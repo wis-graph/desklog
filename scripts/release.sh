@@ -53,9 +53,14 @@ printf "진행할까? [y/N] "; read -r ans; [ "$ans" = "y" ] || die "그만둔�
 
 # ---- 판 올리고 CHANGELOG 절을 확정한다 ----
 TODAY=$(date +%Y-%m-%d)
-sed -i '' "0,/^version = \"$CUR\"/s//version = \"$NEW\"/" Cargo.toml
-sed -i '' "s/^## 미출시$/## 미출시\n\n## $NEW ($TODAY)/" CHANGELOG.md
+python3 scripts/bump.py "$CUR" "$NEW" "$TODAY"
+
+# 편집이 실제로 먹었는지 확인한다. 0.1.2 를 낼 때 sed 가 조용히 실패해서
+# formula 는 0.1.2 인데 바이너리는 0.1.1 을 말하는 일이 있었다.
+grep -q "^version = \"$NEW\"$" Cargo.toml || die "Cargo.toml 판 번호가 안 바뀌었다"
+grep -q "^## $NEW ($TODAY)$" CHANGELOG.md || die "CHANGELOG 절이 안 만들어졌다"
 cargo build --release --quiet
+[ "$(./target/release/desklog --version)" = "desklog $NEW" ] || die "바이너리가 $NEW 를 말하지 않는다"
 
 git add -A
 git commit -q -m "release: $NEW
