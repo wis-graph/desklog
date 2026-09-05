@@ -12,6 +12,13 @@
 ## 설치
 
 ```
+brew install wis-graph/tap/desklog
+brew services start desklog      # 로그인할 때 자동으로 수집을 시작한다
+```
+
+소스에서 직접:
+
+```
 cargo build --release
 ln -sf "$PWD/target/release/desklog" ~/bin/desklog
 ```
@@ -91,3 +98,7 @@ pub fn idle_seconds() -> f64
 ```
 cargo test
 ```
+
+## 라이선스
+
+MIT
