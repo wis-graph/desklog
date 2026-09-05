@@ -43,7 +43,7 @@ desklog watch              상주하며 5초마다 관측한다
 desklog now                현재 상태를 JSON 한 줄로 (다른 프로그램이 호출)
 desklog live               현재 상태를 1초마다 갱신
 desklog log [개수]         구간 원본을 훑어본다 (기본 40)
-desklog top [일수]         앱별 시간·시간대·창 제목 요약 (기본 7)
+desklog top [일수] [앱]    앱별 시간·시간대·창 제목 요약 (기본 7일, 앱을 주면 그 앱만)
 desklog label yes|no       라벨 기록
 desklog export             학습용 CSV
 ```
@@ -65,6 +65,35 @@ nohup desklog watch > /tmp/desklog.log 2>&1 &
 
 `길이`(화면 앞에 있던 시간)와 `입력`(실제로 입력이 있던 시간)이 나뉘어 있다.
 둘의 차이가 "보고만 있던 시간"이다.
+
+```
+desklog top 7 카카오톡      그 앱만 좁혀서 본다
+```
+
+## 직접 조회
+
+sqlite 파일이라 아무 도구로나 읽을 수 있다. `sqlite3 -box ~/.desklog.db` 로 붙는다.
+
+```sql
+-- 특정 앱에서 본 창 제목
+SELECT title, SUM(end_t-start_t+5) AS 초 FROM spans
+WHERE app='Google Chrome' GROUP BY title ORDER BY 초 DESC LIMIT 20;
+
+-- 화면 앞에는 있었지만 입력이 거의 없던 구간 (보고만 있던 시간)
+SELECT datetime(start_t,'unixepoch','localtime') AS 시작,
+       (end_t-start_t+5)/60 AS 분, app, title
+FROM spans WHERE end_t-start_t > 600 AND active_s*10 < end_t-start_t
+ORDER BY start_t DESC;
+
+-- 늦은 시각에 무엇을 했나
+SELECT hour, app, SUM(end_t-start_t+5) AS 초 FROM spans
+WHERE hour BETWEEN 0 AND 5 GROUP BY hour, app ORDER BY hour, 초 DESC;
+
+-- 하루별 총 사용 시간
+SELECT date(start_t,'unixepoch','localtime') AS 날짜,
+       SUM(end_t-start_t+5)/3600.0 AS 시간
+FROM spans GROUP BY 날짜 ORDER BY 날짜 DESC;
+```
 
 ## 저장 방식
 

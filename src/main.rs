@@ -24,7 +24,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   now                현재 상태를 JSON 한 줄로 출력한다 (로봇·스크립트가 호출)
   live               현재 상태를 1초마다 갱신한다
   log [개수]         원시 기록을 훑어본다 (기본 40). 끊긴 구간을 표시한다
-  top [일수]         앱별 시간·시간대·창 제목 요약 (기본 7)
+  top [일수] [앱]    앱별 시간·시간대·창 제목 요약 (기본 7일, 앱을 주면 그 앱만)
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
 
@@ -77,7 +77,11 @@ fn main() {
         "now" => println!("{}", now_json(&db)),
         "live" => live(&db),
         "log" => log(&db, args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40)),
-        "top" => top(&db, args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7)),
+        "top" => top(
+            &db,
+            args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7),
+            args.get(2).map(String::as_str),
+        ),
         "label" => label(&db, args.get(1).map(String::as_str)),
         "export" => export(&db),
         other => {
@@ -360,33 +364,45 @@ fn export(db: &Connection) {
 /// 구간 길이. 한 틱짜리 구간도 SAMPLE_S 만큼으로 센다.
 const LEN: &str = "SUM(end_t - start_t + 5)";
 
-fn top(db: &Connection, days: i64) {
+fn top(db: &Connection, days: i64, only: Option<&str>) {
     let since = unix_now() - days * 86400;
+    // 앱을 지정하면 모든 집계를 그 앱으로 좁힌다.
+    let only_s = only.unwrap_or("");
+    let (filter, params): (String, Vec<&dyn rusqlite::ToSql>) = if only.is_some() {
+        (" AND app = ?2".into(), vec![&since, &only_s])
+    } else {
+        (String::new(), vec![&since])
+    };
+    let p = params.as_slice();
 
     let (total, typed): (i64, i64) = db
         .query_row(
             &format!(
-                "SELECT COALESCE({LEN},0), COALESCE(SUM(active_s),0) FROM spans WHERE end_t >= ?1"
+                "SELECT COALESCE({LEN},0), COALESCE(SUM(active_s),0) FROM spans WHERE end_t >= ?1{filter}"
             ),
-            [since],
+            p,
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0));
     if total == 0 {
-        println!("기록 없음. desklog watch 를 먼저 띄워라.");
+        match only {
+            Some(a) => println!("'{a}' 기록 없음. 앱 이름을 정확히 적었는지 보라."),
+            None => println!("기록 없음. desklog watch 를 먼저 띄워라."),
+        }
         return;
     }
 
     let span: (i64, i64) = db
         .query_row(
-            "SELECT MIN(start_t), MAX(end_t) FROM spans WHERE end_t >= ?1",
-            [since],
+            &format!("SELECT MIN(start_t), MAX(end_t) FROM spans WHERE end_t >= ?1{filter}"),
+            p,
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0));
     println!(
-        "\n최근 {}일 · 기록 {} · 그중 입력 있던 시간 {} · 구간 {}\n",
+        "\n최근 {}일{} · 기록 {} · 그중 입력 있던 시간 {} · 구간 {}\n",
         days,
+        only.map_or(String::new(), |a| format!(" · {a}"),),
         dur(total),
         dur(typed),
         dur(span.1 - span.0)
@@ -395,12 +411,12 @@ fn top(db: &Connection, days: i64) {
     println!("앱별  (화면 앞 시간 / 입력 있던 시간)");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT app, {LEN} l, SUM(active_s) FROM spans WHERE end_t >= ?1
+            "SELECT app, {LEN} l, SUM(active_s) FROM spans WHERE end_t >= ?1{filter}
              GROUP BY app ORDER BY l DESC LIMIT 12"
         ))
         .unwrap();
     let rows: Vec<(String, i64, i64)> = stmt
-        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2).unwrap_or(0))))
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?, r.get(2).unwrap_or(0))))
         .unwrap()
         .flatten()
         .collect();
@@ -418,12 +434,12 @@ fn top(db: &Connection, days: i64) {
     println!("\n시간대");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT hour, {LEN} FROM spans WHERE end_t >= ?1 GROUP BY hour"
+            "SELECT hour, {LEN} FROM spans WHERE end_t >= ?1{filter} GROUP BY hour"
         ))
         .unwrap();
     let mut hours = [0i64; 24];
     for (h, l) in stmt
-        .query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .query_map(p, |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
         .unwrap()
         .flatten()
     {
