@@ -148,6 +148,8 @@ pub fn idle_seconds() -> f64
 cargo test
 ```
 
+판 내는 법은 [RELEASING.md](RELEASING.md). 바꾼 것은 `CHANGELOG.md`의 `## 미출시` 절에 적는다.
+
 ## 라이선스
 
 MIT
