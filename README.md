@@ -16,12 +16,25 @@ brew install wis-graph/tap/desklog
 brew services start desklog      # 로그인할 때 자동으로 수집을 시작한다
 ```
 
+`brew services`가 launchd에 등록하므로 재부팅해도 알아서 다시 뜬다.
+죽으면 다시 띄운다(`keep_alive`).
+
+```
+brew services list | grep desklog     상태 확인
+brew services stop desklog            중지
+brew services restart desklog         재시작
+tail -f $(brew --prefix)/var/log/desklog.log
+```
+
 소스에서 직접:
 
 ```
 cargo build --release
 ln -sf "$PWD/target/release/desklog" ~/bin/desklog
 ```
+
+`~/bin`이 PATH에서 Homebrew보다 앞이면 brew로 설치한 것을 가린다.
+둘 다 있으면 `which desklog`로 확인한다.
 
 ## 사용
 
@@ -35,7 +48,7 @@ desklog label yes|no       라벨 기록
 desklog export             학습용 CSV
 ```
 
-상주시키기:
+`brew services`를 쓰지 않고 직접 띄우려면:
 
 ```
 nohup desklog watch > /tmp/desklog.log 2>&1 &
@@ -91,7 +104,14 @@ pub fn idle_seconds() -> f64
 나머지는 OS를 모른다. 실제로 다른 것은 하나 — macOS는 다른 앱의 창 제목을 읽으려면
 화면 기록 권한이 필요해서 `None`이 올 수 있다. 윈도우는 권한 없이 항상 준다.
 
-**윈도우 코드는 아직 실기에서 컴파일해본 적 없다.**
+**윈도우 코드는 아직 실기에서 컴파일해본 적 없다.** Homebrew 설치도 macOS만 확인했다.
+
+## 알려진 거친 부분
+
+- 앱을 전환하는 순간 `active_window()`가 `None`을 반환해서 `app`이 `unknown`인
+  짧은 구간이 생길 때가 있다. 재시도를 넣지 않았다.
+- macOS에서 창 제목을 읽으려면 화면 기록 권한이 필요하다. 권한은 실행 파일마다
+  따로 물어보므로, 소스 빌드본에 권한을 줬더라도 brew 설치본은 다시 물어볼 수 있다.
 
 ## 개발
 
