@@ -163,6 +163,7 @@ name = "desklog"
 version = "0.1.1"
 dependencies = [
  "active-win-pos-rs",
+ "objc",
  "rusqlite",
  "windows-sys 0.59.0",
 ]

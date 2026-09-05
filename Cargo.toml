@@ -7,6 +7,9 @@ edition = "2021"
 rusqlite = { version = "0.32", features = ["bundled"] }
 active-win-pos-rs = "0.8"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
