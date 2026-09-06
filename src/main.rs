@@ -28,6 +28,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
   doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지 진단한다
+  focus [일수]       몰입 구간 — 한 앱에 오래, 입력을 하면서 머문 시간 (기본 7일)
 
 옵션:
   -h, --help         이 도움말
@@ -86,6 +87,7 @@ fn main() {
         "label" => label(&db, args.get(1).map(String::as_str)),
         "export" => export(&db),
         "doctor" => doctor(&db),
+        "focus" => focus(&db, args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7)),
         other => {
             eprintln!("모르는 명령: {other}\n");
             print!("{HELP}");
@@ -558,6 +560,253 @@ fn log(db: &Connection, n: i64) {
     println!();
 }
 
+// ---------- 몰입 구간 ----------
+//
+// 몰입은 "같은 화면이 오래 떠 있었다"가 아니다. 사람이 거기서 무언가를 하고 있어야 한다.
+// 그래서 세 조건이다 — 한 앱에 오래, 그 동안 입력이 있었고, 화면이 잠기지 않았다.
+
+/// 이보다 짧으면 몰입으로 치지 않는다.
+const FOCUS_MIN_S: i64 = 15 * 60;
+/// 구간 길이 대비 입력이 있던 시간이 이보다 적으면 보고만 있던 것이다.
+const FOCUS_MIN_ACTIVE_PCT: i64 = 50;
+/// 이보다 짧은 딴 앱 방문은 몰입을 끊지 않는다. 알림 확인 정도.
+const FOCUS_GAP_TOLERANCE_S: i64 = 60;
+
+#[derive(Clone, Debug)]
+pub struct Row {
+    pub start_t: i64,
+    pub end_t: i64,
+    pub app: String,
+    pub title: Option<String>,
+    pub active_s: i64,
+    pub session_s: i64,
+    pub locked: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Block {
+    pub start_t: i64,
+    pub end_t: i64,
+    pub app: String,
+    pub active_s: i64,
+    /// 제목별 머문 시간. 가장 오래 본 제목을 대표로 쓴다.
+    pub titles: Vec<(String, i64)>,
+}
+
+impl Block {
+    pub fn len_s(&self) -> i64 {
+        self.end_t - self.start_t + SAMPLE_S as i64
+    }
+    pub fn active_pct(&self) -> i64 {
+        self.active_s * 100 / self.len_s().max(1)
+    }
+    pub fn top_title(&self) -> Option<&str> {
+        self.titles.iter().max_by_key(|(_, s)| *s).map(|(t, _)| t.as_str())
+    }
+}
+
+/// 구간들을 앱 단위로 이어 붙여 몰입 후보를 만든다. 시(hour)로 잘린 것은 다시 붙고,
+/// 제목이 바뀐 것도 같은 앱이면 붙는다. 끊는 것은 넷 — 다른 앱(허용치 초과), 잠금, 세션 재시작, 기록 공백.
+pub fn build_blocks(rows: &[Row]) -> Vec<Block> {
+    // 1) 같은 앱이 이어지는 만큼 붙인다
+    let mut runs: Vec<(Block, bool)> = Vec::new(); // (블록, 잠김)
+    let mut prev: Option<&Row> = None;
+    for r in rows {
+        let len = r.end_t - r.start_t + SAMPLE_S as i64;
+        let breaks = match prev {
+            None => true,
+            Some(p) => {
+                r.locked != p.locked
+                    || r.app != p.app
+                    || r.start_t - p.end_t > SAMPLE_S as i64 * 3 // 기록 공백
+                    || r.session_s < p.session_s // 세션이 다시 시작됐다 = 5분 넘게 자리 비움
+            }
+        };
+        if breaks {
+            runs.push((
+                Block {
+                    start_t: r.start_t,
+                    end_t: r.end_t,
+                    app: r.app.clone(),
+                    active_s: r.active_s,
+                    titles: r.title.iter().map(|t| (t.clone(), len)).collect(),
+                },
+                r.locked,
+            ));
+        } else {
+            let (b, _) = runs.last_mut().unwrap();
+            b.end_t = r.end_t;
+            b.active_s += r.active_s;
+            if let Some(t) = &r.title {
+                match b.titles.iter_mut().find(|(x, _)| x == t) {
+                    Some((_, s)) => *s += len,
+                    None => b.titles.push((t.clone(), len)),
+                }
+            }
+        }
+        prev = Some(r);
+    }
+
+    // 2) 짧은 딴 앱 방문이 같은 앱 사이에 끼어 있으면 삼킨다. 안정될 때까지.
+    loop {
+        let mut merged = false;
+        let mut out: Vec<(Block, bool)> = Vec::new();
+        let mut i = 0;
+        while i < runs.len() {
+            let is_short_gap = i + 1 < runs.len()
+                && !out.is_empty()
+                && !runs[i].1
+                && runs[i].0.len_s() <= FOCUS_GAP_TOLERANCE_S
+                && out.last().unwrap().0.app == runs[i + 1].0.app
+                && !out.last().unwrap().1
+                && !runs[i + 1].1
+                && runs[i + 1].0.start_t - out.last().unwrap().0.end_t <= FOCUS_GAP_TOLERANCE_S + SAMPLE_S as i64 * 2;
+            if is_short_gap {
+                let gap = &runs[i].0;
+                let next = &runs[i + 1].0;
+                let (last, _) = out.last_mut().unwrap();
+                last.end_t = next.end_t;
+                last.active_s += gap.active_s + next.active_s;
+                for (t, s) in &next.titles {
+                    match last.titles.iter_mut().find(|(x, _)| x == t) {
+                        Some((_, acc)) => *acc += s,
+                        None => last.titles.push((t.clone(), *s)),
+                    }
+                }
+                i += 2;
+                merged = true;
+            } else {
+                out.push((runs[i].0.clone(), runs[i].1));
+                i += 1;
+            }
+        }
+        runs = out;
+        if !merged {
+            break;
+        }
+    }
+
+    runs.into_iter().filter(|(_, locked)| !locked).map(|(b, _)| b).collect()
+}
+
+impl Clone for Block {
+    fn clone(&self) -> Self {
+        Block {
+            start_t: self.start_t,
+            end_t: self.end_t,
+            app: self.app.clone(),
+            active_s: self.active_s,
+            titles: self.titles.clone(),
+        }
+    }
+}
+
+pub fn is_focus(b: &Block) -> bool {
+    b.len_s() >= FOCUS_MIN_S && b.active_pct() >= FOCUS_MIN_ACTIVE_PCT
+}
+
+fn focus(db: &Connection, days: i64) {
+    let since = unix_now() - days * 86400;
+    let mut stmt = db
+        .prepare(
+            "SELECT start_t, end_t, app, title, active_s, session_s, locked FROM spans
+             WHERE end_t >= ?1 ORDER BY start_t",
+        )
+        .unwrap();
+    let rows: Vec<Row> = stmt
+        .query_map([since], |r| {
+            Ok(Row {
+                start_t: r.get(0)?,
+                end_t: r.get(1)?,
+                app: r.get(2)?,
+                title: r.get(3)?,
+                active_s: r.get(4)?,
+                session_s: r.get(5)?,
+                locked: r.get(6)?,
+            })
+        })
+        .unwrap()
+        .flatten()
+        .collect();
+    if rows.is_empty() {
+        println!("기록 없음. desklog watch 를 먼저 띄워라.");
+        return;
+    }
+
+    let blocks: Vec<Block> = build_blocks(&rows).into_iter().filter(is_focus).collect();
+    println!(
+        "\n최근 {days}일 · 몰입 기준: 한 앱에 {}분 이상, 그중 입력 {}% 이상, {}초 이하 딴짓은 무시\n",
+        FOCUS_MIN_S / 60,
+        FOCUS_MIN_ACTIVE_PCT,
+        FOCUS_GAP_TOLERANCE_S
+    );
+    if blocks.is_empty() {
+        println!("몰입 구간 없음.\n");
+        return;
+    }
+
+    println!("{:<6} {:<12} {:>8} {:>5}  {:<16} {}", "날짜", "구간", "길이", "입력", "앱", "제목");
+    for b in &blocks {
+        println!(
+            "{:<6} {}~{} {:>8} {:>4}%  {:<16} {}",
+            mmdd(b.start_t),
+            hhmm(b.start_t),
+            hhmm(b.end_t),
+            dur(b.len_s()),
+            b.active_pct(),
+            trunc(&b.app, 16),
+            trunc(b.top_title().unwrap_or("-"), 36)
+        );
+    }
+
+    let mut by_day: Vec<(String, i64, i64)> = Vec::new();
+    let mut by_app: Vec<(String, i64)> = Vec::new();
+    for b in &blocks {
+        let d = mmdd(b.start_t);
+        match by_day.iter_mut().find(|(x, _, _)| *x == d) {
+            Some((_, s, n)) => {
+                *s += b.len_s();
+                *n += 1;
+            }
+            None => by_day.push((d, b.len_s(), 1)),
+        }
+        match by_app.iter_mut().find(|(x, _)| *x == b.app) {
+            Some((_, s)) => *s += b.len_s(),
+            None => by_app.push((b.app.clone(), b.len_s())),
+        }
+    }
+    by_app.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("\n하루별 몰입");
+    for (d, s, n) in &by_day {
+        println!("  {d}  {:>8}  (구간 {n}개)", dur(*s));
+    }
+    println!("\n앱별 몰입");
+    let max = by_app.first().map_or(1, |x| x.1);
+    for (a, s) in &by_app {
+        println!("  {:<16} {:>8}  {}", trunc(a, 16), dur(*s), bar(*s, max, 24));
+    }
+    println!();
+}
+
+fn mmdd(t: i64) -> String {
+    let days = (t + local_utc_offset_seconds()).div_euclid(86400);
+    // 1970-01-01 부터의 날수 → 월/일. 윤년 계산은 civil_from_days 알고리즘.
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{m:02}-{d:02}")
+}
+
+fn hhmm(t: i64) -> String {
+    let s = (t + local_utc_offset_seconds()).rem_euclid(86400);
+    format!("{:02}:{:02}", s / 3600, (s % 3600) / 60)
+}
+
 /// 잘 돌고 있는지, 무엇을 못 읽고 있는지. 문제가 조용히 지나가지 않게 한다.
 fn doctor(db: &Connection) {
     let now = unix_now();
@@ -710,9 +959,59 @@ mod tests {
         assert_eq!(parse_offset("garbage"), 0);
     }
 
+    fn row(start: i64, end: i64, app: &str, active: i64, session: i64, locked: bool) -> Row {
+        Row {
+            start_t: start,
+            end_t: end,
+            app: app.into(),
+            title: None,
+            active_s: active,
+            session_s: session,
+            locked,
+        }
+    }
+
+    #[test]
+    fn focus_needs_input_not_just_a_window() {
+        // 같은 앱 60분, 입력 0 → 몰입 아님 (자리를 비웠거나 보고만 있었다)
+        let staring = build_blocks(&[row(0, 3595, "Chrome", 0, 3600, false)]);
+        assert_eq!(staring.len(), 1);
+        assert!(!is_focus(&staring[0]), "입력 없는 60분은 몰입이 아니다");
+
+        // 같은 앱 30분, 입력 25분 → 몰입
+        let working = build_blocks(&[row(0, 1795, "Code", 1500, 1800, false)]);
+        assert!(is_focus(&working[0]));
+    }
+
+    #[test]
+    fn focus_joins_hour_splits_and_swallows_short_detours() {
+        let rows = [
+            row(0, 595, "Code", 600, 600, false),      // 10분
+            row(600, 1195, "Code", 600, 1200, false),  // 시(hour) 경계로 잘린 다음 10분
+            row(1200, 1220, "카카오톡", 25, 1225, false), // 25초 알림 확인
+            row(1225, 1795, "Code", 570, 1800, false), // 다시 10분
+        ];
+        let b = build_blocks(&rows);
+        assert_eq!(b.len(), 1, "시 경계와 짧은 딴짓을 넘어 하나로 붙어야 한다: {b:?}");
+        assert_eq!(b[0].len_s(), 1800);
+        assert!(is_focus(&b[0]));
+    }
+
+    #[test]
+    fn focus_breaks_on_session_restart_and_lock() {
+        let rows = [
+            row(0, 1795, "Code", 1800, 1800, false),
+            row(1800, 2395, "Code", 0, 0, false), // session_s 가 0 으로 돌아왔다 = 자리 비웠다 돌아옴
+            row(2400, 2995, "Code", 600, 600, true), // 잠김
+        ];
+        let b = build_blocks(&rows);
+        assert_eq!(b.len(), 2, "세션 재시작에서 끊기고 잠긴 구간은 빠져야 한다: {b:?}");
+        assert_eq!(b[0].len_s(), 1800);
+    }
+
     #[test]
     fn help_lists_every_command() {
-        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor"] {
+        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor", "focus"] {
             assert!(HELP.contains(cmd), "도움말에 {cmd} 가 빠졌다");
         }
         assert!(HELP.contains("--help") && HELP.contains("--version"));
