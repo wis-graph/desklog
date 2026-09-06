@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "desklog"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "active-win-pos-rs",
  "objc",
