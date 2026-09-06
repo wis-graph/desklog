@@ -8,7 +8,9 @@ fn main() {
             .map(|w| format!("{:?}/{:?}", w.app_name, w.title))
             .unwrap_or_else(|_| "Err".into());
         println!(
-            "크레이트={:<28} 최전면={:?}  →  결과={:?}",
+            "잠김={} 유휴={:.0}s 크레이트={:<24} 최전면={:?}  →  {:?}",
+            platform::screen_locked(),
+            platform::idle_seconds(),
             raw,
             platform::frontmost_app(),
             platform::active_window()

@@ -1,4 +1,4 @@
-//! OS별로 갈리는 유일한 곳. 나머지 코드는 이 두 함수만 본다.
+//! OS별로 갈리는 유일한 곳. 나머지 코드는 여기 함수들만 본다.
 
 /// 활성 창의 (앱 이름, 창 제목). 제목은 못 읽을 수 있다.
 /// macOS는 다른 앱의 창 제목에 화면 기록 권한이 필요해서, 미승인이면 None이 온다.
@@ -90,4 +90,96 @@ pub fn idle_seconds() -> f64 {
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn idle_seconds() -> f64 {
     0.0
+}
+
+/// 화면이 잠겼거나 꺼졌는가. 사람이 화면을 볼 수 없는 상태다.
+/// 입력 없음만으로는 자리 비움과 보고만 있음이 구분되지 않는데, 이 값이 그 절반을 가른다.
+#[cfg(target_os = "macos")]
+pub fn screen_locked() -> bool {
+    use std::ffi::c_void;
+    use std::os::raw::c_char;
+    const UTF8: u32 = 0x0800_0100;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayIsAsleep(display: u32) -> u32;
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, enc: u32) -> *const c_void;
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFBooleanGetValue(b: *const c_void) -> u8;
+        fn CFRelease(cf: *const c_void);
+    }
+    unsafe {
+        if CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
+            return true;
+        }
+        let dict = CGSessionCopyCurrentDictionary();
+        if dict.is_null() {
+            return false;
+        }
+        let key = CFStringCreateWithCString(
+            std::ptr::null(),
+            c"CGSSessionScreenIsLocked".as_ptr(),
+            UTF8,
+        );
+        let v = CFDictionaryGetValue(dict, key);
+        let locked = !v.is_null() && CFBooleanGetValue(v) != 0;
+        CFRelease(key);
+        CFRelease(dict);
+        locked
+    }
+}
+
+/// 잠금 화면·화면 보호기·UAC 화면에서는 입력 데스크톱을 열 수 없다. 셋 다 사람이 화면을 못 보는 상태다.
+#[cfg(windows)]
+pub fn screen_locked() -> bool {
+    use windows_sys::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_SWITCHDESKTOP,
+    };
+    unsafe {
+        let d = OpenInputDesktop(0, 0, DESKTOP_SWITCHDESKTOP);
+        if d.is_null() {
+            return true;
+        }
+        CloseDesktop(d);
+        false
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn screen_locked() -> bool {
+    false
+}
+
+/// 화면 기록 권한이 있는가. macOS 는 이것이 없으면 다른 앱의 창 제목을 주지 않는다.
+#[cfg(target_os = "macos")]
+pub fn screen_capture_allowed() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGPreflightScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+/// 권한을 요청한다. 없으면 시스템 대화상자가 뜨고, 사용자가 허용하면 다음 실행부터 적용된다.
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn screen_capture_allowed() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture() -> bool {
+    true
 }

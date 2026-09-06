@@ -27,6 +27,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   top [일수] [앱]    앱별 시간·시간대·창 제목 요약 (기본 7일, 앱을 주면 그 앱만)
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
+  doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지 진단한다
 
 옵션:
   -h, --help         이 도움말
@@ -84,6 +85,7 @@ fn main() {
         ),
         "label" => label(&db, args.get(1).map(String::as_str)),
         "export" => export(&db),
+        "doctor" => doctor(&db),
         other => {
             eprintln!("모르는 명령: {other}\n");
             print!("{HELP}");
@@ -115,7 +117,8 @@ fn open_db() -> Connection {
             active_s   INTEGER NOT NULL,  -- 구간 안에서 입력이 있던 시간
             idle_s     REAL    NOT NULL,  -- 구간 끝 시점의 유휴 시간
             session_s  INTEGER NOT NULL,
-            app_s      INTEGER NOT NULL
+            app_s      INTEGER NOT NULL,
+            locked     INTEGER NOT NULL DEFAULT 0  -- 화면이 잠겼거나 꺼져 있었다
          );
          CREATE INDEX IF NOT EXISTS idx_spans_start ON spans(start_t);
          CREATE TABLE IF NOT EXISTS labels (
@@ -124,6 +127,18 @@ fn open_db() -> Connection {
          );",
     )
     .expect("스키마 생성 실패");
+    // 0.1.x 로 만든 DB 에는 locked 열이 없다. 있는지 보고 없으면 더한다.
+    let has_locked: bool = db
+        .prepare("PRAGMA table_info(spans)")
+        .and_then(|mut st| {
+            let names: Vec<String> = st.query_map([], |r| r.get::<_, String>(1))?.flatten().collect();
+            Ok(names.iter().any(|n| n == "locked"))
+        })
+        .unwrap_or(true);
+    if !has_locked {
+        db.execute_batch("ALTER TABLE spans ADD COLUMN locked INTEGER NOT NULL DEFAULT 0")
+            .expect("locked 열 추가 실패");
+    }
     db
 }
 
@@ -224,6 +239,8 @@ pub struct Key {
     /// 시간대 통계가 구간에 걸쳐 뭉개지지 않도록 '시'가 바뀌면 자른다.
     pub hour: i64,
     pub session: u64,
+    /// 잠금·해제 순간에 구간이 갈리게 한다.
+    pub locked: bool,
 }
 
 // ---------- 명령 ----------
@@ -232,16 +249,22 @@ fn watch(db: &Connection) {
     let mut tracker = Tracker::new(IDLE_BREAK_S);
     let mut open: Option<(i64, Key, i64)> = None; // (행 id, 구간 열쇠, 누적 입력 시간)
     eprintln!("desklog watch — {} (Ctrl-C로 중지)", db_path().display());
+    if !platform::screen_capture_allowed() {
+        eprintln!("화면 기록 권한이 없어 창 제목을 못 읽는다. 요청한다 — 허용하면 다음 실행부터 적용된다.");
+        platform::request_screen_capture();
+    }
     loop {
         let t = unix_now();
         let idle = platform::idle_seconds();
         let (app, title) = platform::active_window().unwrap_or(("unknown".into(), None));
+        let locked = platform::screen_locked();
         let (session_s, app_s) = tracker.update(t, &app, idle);
         let key = Key {
             app: app.clone(),
             title: title.clone(),
             hour: local_hour(t),
             session: tracker.session_id(),
+            locked,
         };
         let active = if idle < ACTIVE_IDLE_S { SAMPLE_S as i64 } else { 0 };
 
@@ -255,13 +278,13 @@ fn watch(db: &Connection) {
                     rusqlite::params![t, *acc, idle, session_s, app_s, *id],
                 )
             }
-            // 앱·창 제목·시간대·세션 중 하나가 바뀌었다 — 새 줄
+            // 앱·창 제목·시간대·세션·잠금 중 하나가 바뀌었다 — 새 줄
             _ => {
                 let r = db.execute(
                     "INSERT INTO spans
-                       (start_t, end_t, app, title, hour, active_s, idle_s, session_s, app_s)
-                     VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    rusqlite::params![t, app, title, key.hour, active, idle, session_s, app_s],
+                       (start_t, end_t, app, title, hour, active_s, idle_s, session_s, app_s, locked)
+                     VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![t, app, title, key.hour, active, idle, session_s, app_s, locked],
                 );
                 if r.is_ok() {
                     open = Some((db.last_insert_rowid(), key, active));
@@ -278,7 +301,7 @@ fn watch(db: &Connection) {
 
 fn now_json(db: &Connection) -> String {
     let row = db.query_row(
-        "SELECT end_t, app, title, idle_s, hour, session_s, app_s, start_t, active_s
+        "SELECT end_t, app, title, idle_s, hour, session_s, app_s, start_t, active_s, locked
          FROM spans ORDER BY end_t DESC LIMIT 1",
         [],
         |r| {
@@ -292,13 +315,14 @@ fn now_json(db: &Connection) -> String {
                 r.get::<_, i64>(6)?,
                 r.get::<_, i64>(7)?,
                 r.get::<_, i64>(8)?,
+                r.get::<_, bool>(9)?,
             ))
         },
     );
     match row {
-        Ok((t, app, title, idle, hour, session_s, app_s, start_t, active_s)) => format!(
+        Ok((t, app, title, idle, hour, session_s, app_s, start_t, active_s, locked)) => format!(
             "{{\"t\":{},\"age_s\":{},\"app\":{},\"title\":{},\"idle_s\":{:.1},\"hour\":{},\
-\"session_s\":{},\"app_s\":{},\"span_s\":{},\"span_active_s\":{}}}",
+\"session_s\":{},\"app_s\":{},\"span_s\":{},\"span_active_s\":{},\"locked\":{}}}",
             t,
             unix_now() - t,
             jstr(&app),
@@ -308,7 +332,8 @@ fn now_json(db: &Connection) -> String {
             session_s,
             app_s,
             t - start_t + SAMPLE_S as i64,
-            active_s
+            active_s,
+            locked
         ),
         Err(_) => "{\"error\":\"no data — desklog watch 를 먼저 띄워라\"}".to_string(),
     }
@@ -331,10 +356,10 @@ fn label(db: &Connection, arg: Option<&str>) {
 }
 
 fn export(db: &Connection) {
-    println!("start_t,end_t,len_s,app,title,hour,active_s,idle_s,session_s,app_s");
+    println!("start_t,end_t,len_s,app,title,hour,active_s,idle_s,session_s,app_s,locked");
     let mut stmt = db
         .prepare(
-            "SELECT start_t, end_t, app, title, hour, active_s, idle_s, session_s, app_s
+            "SELECT start_t, end_t, app, title, hour, active_s, idle_s, session_s, app_s, locked
              FROM spans ORDER BY start_t",
         )
         .unwrap();
@@ -342,7 +367,7 @@ fn export(db: &Connection) {
         .query_map([], |r| {
             let (start_t, end_t) = (r.get::<_, i64>(0)?, r.get::<_, i64>(1)?);
             Ok(format!(
-                "{},{},{},{},{},{},{},{:.1},{},{}",
+                "{},{},{},{},{},{},{},{:.1},{},{},{}",
                 start_t,
                 end_t,
                 end_t - start_t + SAMPLE_S as i64,
@@ -352,7 +377,8 @@ fn export(db: &Connection) {
                 r.get::<_, i64>(5)?,
                 r.get::<_, f64>(6)?,
                 r.get::<_, i64>(7)?,
-                r.get::<_, i64>(8)?
+                r.get::<_, i64>(8)?,
+                r.get::<_, i64>(9)?
             ))
         })
         .unwrap();
@@ -375,15 +401,19 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
     };
     let p = params.as_slice();
 
-    let (total, typed): (i64, i64) = db
+    // 화면이 잠긴 구간은 "화면 앞 시간"이 아니다. 빼되, 뺀 양은 머리줄에 보여준다.
+    let (total, typed, locked_s): (i64, i64, i64) = db
         .query_row(
             &format!(
-                "SELECT COALESCE({LEN},0), COALESCE(SUM(active_s),0) FROM spans WHERE end_t >= ?1{filter}"
+                "SELECT COALESCE(SUM(CASE WHEN locked=0 THEN end_t-start_t+5 ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN locked=0 THEN active_s ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN locked=1 THEN end_t-start_t+5 ELSE 0 END),0)
+                 FROM spans WHERE end_t >= ?1{filter}"
             ),
             p,
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
-        .unwrap_or((0, 0));
+        .unwrap_or((0, 0, 0));
     if total == 0 {
         match only {
             Some(a) => println!("'{a}' 기록 없음. 앱 이름을 정확히 적었는지 보라."),
@@ -400,18 +430,19 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
         )
         .unwrap_or((0, 0));
     println!(
-        "\n최근 {}일{} · 기록 {} · 그중 입력 있던 시간 {} · 구간 {}\n",
+        "\n최근 {}일{} · 최전면 {} · 그중 입력 {} · 화면 잠김 {} · 구간 {}\n",
         days,
         only.map_or(String::new(), |a| format!(" · {a}"),),
         dur(total),
         dur(typed),
+        dur(locked_s),
         dur(span.1 - span.0)
     );
 
-    println!("앱별  (화면 앞 시간 / 입력 있던 시간)");
+    println!("앱별  (최전면 시간 / 입력 있던 시간)");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT app, {LEN} l, SUM(active_s) FROM spans WHERE end_t >= ?1{filter}
+            "SELECT app, {LEN} l, SUM(active_s) FROM spans WHERE end_t >= ?1 AND locked=0{filter}
              GROUP BY app ORDER BY l DESC LIMIT 12"
         ))
         .unwrap();
@@ -434,7 +465,7 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
     println!("\n시간대");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT hour, {LEN} FROM spans WHERE end_t >= ?1{filter} GROUP BY hour"
+            "SELECT hour, {LEN} FROM spans WHERE end_t >= ?1 AND locked=0{filter} GROUP BY hour"
         ))
         .unwrap();
     let mut hours = [0i64; 24];
@@ -460,7 +491,7 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
         let mut stmt = db
             .prepare(&format!(
                 "SELECT title, {LEN} l FROM spans
-                 WHERE end_t >= ?1 AND app = ?2 AND title IS NOT NULL
+                 WHERE end_t >= ?1 AND app = ?2 AND title IS NOT NULL AND locked=0
                  GROUP BY title ORDER BY l DESC LIMIT 10"
             ))
             .unwrap();
@@ -481,13 +512,13 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
 fn log(db: &Connection, n: i64) {
     let mut stmt = db
         .prepare(
-            "SELECT start_t, end_t, app, title, active_s FROM spans
+            "SELECT start_t, end_t, app, title, active_s, locked FROM spans
              ORDER BY end_t DESC LIMIT ?1",
         )
         .unwrap();
-    let rows: Vec<(i64, i64, String, Option<String>, i64)> = stmt
+    let rows: Vec<(i64, i64, String, Option<String>, i64, bool)> = stmt
         .query_map([n], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         })
         .unwrap()
         .flatten()
@@ -501,7 +532,7 @@ fn log(db: &Connection, n: i64) {
         "구간", "길이", "입력", "앱", "창 제목"
     );
     let mut prev_end: Option<i64> = None;
-    for (start_t, end_t, app, title, active_s) in rows.into_iter().rev() {
+    for (start_t, end_t, app, title, active_s, locked) in rows.into_iter().rev() {
         // 기록이 끊긴 구간을 눈에 보이게 표시한다. 수집기가 죽었는지 알아야 한다.
         if let Some(p) = prev_end {
             let gap = start_t - p;
@@ -517,9 +548,69 @@ fn log(db: &Connection, n: i64) {
             dur(end_t - start_t + SAMPLE_S as i64),
             dur(active_s),
             trunc(&app, 16),
-            trunc(title.as_deref().unwrap_or("(제목 없음)"), 38)
+            if locked {
+                "[화면 잠김]".to_string()
+            } else {
+                trunc(title.as_deref().unwrap_or("(제목 없음)"), 38)
+            }
         );
     }
+    println!();
+}
+
+/// 잘 돌고 있는지, 무엇을 못 읽고 있는지. 문제가 조용히 지나가지 않게 한다.
+fn doctor(db: &Connection) {
+    let now = unix_now();
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "?".into());
+    println!("\n실행 파일    {exe}");
+    println!("DB           {}", db_path().display());
+
+    let (rows, last): (i64, Option<i64>) = db
+        .query_row("SELECT COUNT(*), MAX(end_t) FROM spans", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap_or((0, None));
+    match last {
+        Some(t) if now - t <= SAMPLE_S as i64 * 3 => println!("수집기      돌고 있다 ({}초 전 기록, 구간 {rows}개)", now - t),
+        Some(t) => println!("수집기      ✗ 멈춰 있다 — 마지막 기록 {} 전. brew services restart desklog", dur(now - t)),
+        None => println!("수집기      ✗ 기록이 하나도 없다 — desklog watch 를 띄워라"),
+    }
+
+    if platform::screen_capture_allowed() {
+        println!("화면 기록    허용 — 창 제목을 읽는다");
+    } else {
+        println!("화면 기록    ✗ 없음 — 창 제목을 못 읽는다 (앱 이름은 읽는다)");
+        println!("             시스템 설정 → 개인정보 보호 및 보안 → 화면 기록 → + → 위 실행 파일 추가");
+        println!("             brew 로 올릴 때마다 경로가 바뀌어 다시 추가해야 한다");
+    }
+
+    // 최근 한 시간, 잠기지 않은 구간 중 제목 없는 비율. 권한 여부와 실제가 맞는지 본다.
+    let (all, none): (i64, i64) = db
+        .query_row(
+            "SELECT COALESCE(SUM(end_t-start_t+5),0),
+                    COALESCE(SUM(CASE WHEN title IS NULL THEN end_t-start_t+5 ELSE 0 END),0)
+             FROM spans WHERE end_t >= ?1 AND locked=0",
+            [now - 3600],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((0, 0));
+    if all > 0 {
+        let pct = none * 100 / all;
+        println!("최근 1시간   제목 없는 비율 {pct}%");
+        // 이 명령은 터미널 권한으로 돌고, 수집기는 launchd 권한으로 돈다. 둘이 다를 수 있다.
+        if pct >= 90 && platform::screen_capture_allowed() {
+            println!("             ✗ 여기서는 권한이 있는데 기록에는 제목이 없다 — 수집기가 다른 권한 맥락(launchd)에서 돌고 있다");
+            println!("             brew services 로 띄운 실행 파일에 따로 권한을 줘야 한다: $(brew --prefix)/opt/desklog/bin/desklog");
+        }
+    }
+
+    let (app, title) = platform::active_window().unwrap_or(("(못 읽음)".into(), None));
+    println!(
+        "지금         앱={app}  제목={}  유휴={:.0}초  잠김={}",
+        title.as_deref().unwrap_or("(없음)"),
+        platform::idle_seconds(),
+        platform::screen_locked()
+    );
     println!();
 }
 
@@ -621,7 +712,7 @@ mod tests {
 
     #[test]
     fn help_lists_every_command() {
-        for cmd in ["watch", "now", "live", "log", "top", "label", "export"] {
+        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor"] {
             assert!(HELP.contains(cmd), "도움말에 {cmd} 가 빠졌다");
         }
         assert!(HELP.contains("--help") && HELP.contains("--version"));
