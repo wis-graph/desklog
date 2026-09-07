@@ -833,19 +833,20 @@ fn doctor(db: &Connection) {
         println!("             brew 로 올릴 때마다 경로가 바뀌어 다시 추가해야 한다");
     }
 
-    // 최근 한 시간, 잠기지 않은 구간 중 제목 없는 비율. 권한 여부와 실제가 맞는지 본다.
+    // 최근 15분, 잠기지 않은 구간 중 제목 없는 비율. 권한 여부와 실제가 맞는지 본다.
+    // 한 시간으로 잡으면 권한을 주고 재시작한 직후에도 옛 기록이 남아 여전히 문제라고 말한다.
     let (all, none): (i64, i64) = db
         .query_row(
             "SELECT COALESCE(SUM(end_t-start_t+5),0),
                     COALESCE(SUM(CASE WHEN title IS NULL THEN end_t-start_t+5 ELSE 0 END),0)
              FROM spans WHERE end_t >= ?1 AND locked=0",
-            [now - 3600],
+            [now - 900],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0));
     if all > 0 {
         let pct = none * 100 / all;
-        println!("최근 1시간   제목 없는 비율 {pct}%");
+        println!("최근 15분    제목 없는 비율 {pct}%");
         // 이 명령은 터미널 권한으로 돌고, 수집기는 launchd 권한으로 돈다. 둘이 다를 수 있다.
         if pct >= 90 && platform::screen_capture_allowed() {
             println!("             ✗ 여기서는 권한이 있는데 기록에는 제목이 없다 — 수집기가 다른 권한 맥락(launchd)에서 돌고 있다");

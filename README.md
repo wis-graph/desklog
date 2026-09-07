@@ -167,21 +167,18 @@ pub fn idle_seconds() -> f64
 
 ## 알려진 거친 부분
 
-### macOS · `brew services`로 띄우면 창 제목이 비어 있다
+### macOS · `brew services`로 띄우면 처음엔 창 제목이 비어 있다
 
 CLI 도구의 화면 기록 권한은 실행 파일이 아니라 **띄운 부모 프로세스**에 붙는다.
-터미널에서 실행하면 터미널의 권한을 물려받아 창 제목이 읽히지만,
-`brew services`(launchd)로 띄우면 물려받을 권한이 없어서 `title`이 계속 `NULL`이다.
+터미널에서 실행하면 터미널의 권한을 물려받지만, `brew services`(launchd)로 띄우면
+물려받을 권한이 없어서 `title`이 `NULL`로 온다.
 
-앱 이름은 영향이 없다 — 창 조회가 실패하면 `NSWorkspace`에 최전면 앱을 따로 묻고,
-그쪽은 권한이 필요 없다.
+그래서 `watch`는 시작할 때 권한이 없으면 요청한다. **시스템 대화상자가 뜨면 허용하고
+`brew services restart desklog`** 하면 그때부터 제목이 읽힌다. 확인은 `desklog doctor`.
 
-창 제목이 필요하면 둘 중 하나를 한다.
+앱 이름은 권한과 무관하다 — 창 조회가 실패하면 `NSWorkspace`에 최전면 앱을 따로 묻는다.
 
-- 시스템 설정 → 개인정보 보호 및 보안 → 화면 기록에서 `$(brew --prefix)/opt/desklog/bin/desklog`를
-  직접 추가한다
-- `brew services`를 쓰지 않고 터미널에서 `nohup desklog watch &` 로 띄운다
-  (재부팅하면 다시 띄워야 한다)
+brew로 판을 올리면 실행 파일 경로가 바뀌므로 권한을 다시 물어볼 수 있다.
 
 무엇이 읽히는지 확인하려면 `desklog doctor`. 터미널에서는 권한이 있는데 기록에 제목이
 없으면, 수집기가 다른 권한 맥락(launchd)에서 돌고 있다고 짚어준다.
