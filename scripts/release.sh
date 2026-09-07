@@ -35,8 +35,12 @@ gh auth status >/dev/null 2>&1 || die "gh 로그인이 안 돼 있다"
 for v in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
   [ -n "${!v:-}" ] || die "$v 가 비어 있다 — devAuth 의 signing.env 가 source 되지 않았다"
 done
-security find-identity -v -p codesigning | grep -q "Developer ID Application" || die "키체인에 Developer ID 인증서가 없다"
-rustup target list --installed | grep -q x86_64-apple-darwin || die "rustup target add x86_64-apple-darwin"
+# 주의: pipefail 아래서 `cmd | grep -q` 는 grep 이 먼저 닫아 cmd 가 SIGPIPE 로 죽고 파이프가 실패한다.
+# 출력을 변수로 받은 뒤 검사한다.
+IDENTS=$(security find-identity -v -p codesigning 2>&1)
+grep -q "Developer ID Application" <<<"$IDENTS" || die "키체인에 Developer ID 인증서가 없다"
+TARGETS=$(rustup target list --installed)
+grep -q x86_64-apple-darwin <<<"$TARGETS" || die "rustup target add x86_64-apple-darwin"
 
 say "테스트"
 "$CARGO" test --quiet
@@ -82,7 +86,9 @@ say "서명 ($SIGN_ID)"
 codesign --force --options runtime --timestamp --identifier "$SIGN_ID" \
   --sign "$APPLE_SIGNING_IDENTITY" "$OUT/desklog"
 codesign --verify --strict "$OUT/desklog" || die "서명 검증 실패"
-codesign -dv "$OUT/desklog" 2>&1 | grep -q "Identifier=$SIGN_ID" || die "식별자가 $SIGN_ID 가 아니다"
+SIGINFO=$(codesign -dv "$OUT/desklog" 2>&1)
+grep -q "Identifier=$SIGN_ID" <<<"$SIGINFO" || die "식별자가 $SIGN_ID 가 아니다"
+grep -q "TeamIdentifier=$APPLE_TEAM_ID" <<<"$SIGINFO" || die "Team ID 가 다르다"
 
 say "공증 (몇 분 걸린다)"
 rm -f "$OUT/desklog.zip"
