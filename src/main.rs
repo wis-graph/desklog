@@ -431,21 +431,22 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0));
+    // 기준은 입력 시간이다. 최전면 시간은 안 자는 기계에서 "켜져 있었다"와 같아 정보가 없다.
     println!(
-        "\n최근 {}일{} · 최전면 {} · 그중 입력 {} · 화면 잠김 {} · 구간 {}\n",
+        "\n최근 {}일{} · 입력 {} · (최전면 {} · 화면 잠김 {}) · 구간 {}\n",
         days,
         only.map_or(String::new(), |a| format!(" · {a}"),),
-        dur(total),
         dur(typed),
+        dur(total),
         dur(locked_s),
         dur(span.1 - span.0)
     );
 
-    println!("앱별  (최전면 시간 / 입력 있던 시간)");
+    println!("앱별  (입력 있던 시간 / 최전면 시간)");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT app, {LEN} l, SUM(active_s) FROM spans WHERE end_t >= ?1 AND locked=0{filter}
-             GROUP BY app ORDER BY l DESC LIMIT 12"
+            "SELECT app, {LEN} l, SUM(active_s) a FROM spans WHERE end_t >= ?1 AND locked=0{filter}
+             GROUP BY app ORDER BY a DESC LIMIT 12"
         ))
         .unwrap();
     let rows: Vec<(String, i64, i64)> = stmt
@@ -453,21 +454,21 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
         .unwrap()
         .flatten()
         .collect();
-    let max = rows.first().map_or(1, |r| r.1);
+    let max = rows.first().map_or(1, |r| r.2);
     for (app, l, ty) in &rows {
         println!(
             "  {:<20} {:>8} / {:>8}  {}",
             trunc(app, 20),
-            dur(*l),
             dur(*ty),
-            bar(*l, max, 24)
+            dur(*l),
+            bar(*ty, max, 24)
         );
     }
 
-    println!("\n시간대");
+    println!("\n시간대  (입력 있던 시간)");
     let mut stmt = db
         .prepare(&format!(
-            "SELECT hour, {LEN} FROM spans WHERE end_t >= ?1 AND locked=0{filter} GROUP BY hour"
+            "SELECT hour, SUM(active_s) FROM spans WHERE end_t >= ?1 AND locked=0{filter} GROUP BY hour"
         ))
         .unwrap();
     let mut hours = [0i64; 24];
@@ -489,12 +490,12 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
     }
 
     if let Some((app, _, _)) = rows.first() {
-        println!("\n'{app}' 안에서 본 창 제목");
+        println!("\n'{app}' 안에서 입력한 창 제목");
         let mut stmt = db
             .prepare(&format!(
-                "SELECT title, {LEN} l FROM spans
+                "SELECT title, SUM(active_s) a FROM spans
                  WHERE end_t >= ?1 AND app = ?2 AND title IS NOT NULL AND locked=0
-                 GROUP BY title ORDER BY l DESC LIMIT 10"
+                 GROUP BY title HAVING a > 0 ORDER BY a DESC LIMIT 10"
             ))
             .unwrap();
         for (title, l) in stmt
