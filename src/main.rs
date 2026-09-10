@@ -251,9 +251,10 @@ fn watch(db: &Connection) {
     let mut tracker = Tracker::new(IDLE_BREAK_S);
     let mut open: Option<(i64, Key, i64)> = None; // (행 id, 구간 열쇠, 누적 입력 시간)
     eprintln!("desklog watch — {} (Ctrl-C로 중지)", db_path().display());
-    if !platform::screen_capture_allowed() {
-        eprintln!("화면 기록 권한이 없어 창 제목을 못 읽는다. 요청한다 — 허용하면 다음 실행부터 적용된다.");
-        platform::request_screen_capture();
+    // preflight 는 launchd 시작 직후 권한이 있어도 false 를 돌려주는 오탐이 있다.
+    // request 는 실제 상태를 반영하고, 이미 허용됐으면 대화상자 없이 true 만 준다.
+    if !platform::request_screen_capture() {
+        eprintln!("화면 기록 권한이 없다 — 창 제목을 못 읽고 앱 이름만 남는다. 시스템 대화상자에서 허용하면 다음 실행부터 적용된다.");
     }
     loop {
         let t = unix_now();
