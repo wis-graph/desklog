@@ -154,32 +154,18 @@ pub fn screen_locked() -> bool {
     false
 }
 
-/// 화면 기록 권한이 있는가. macOS 는 이것이 없으면 다른 앱의 창 제목을 주지 않는다.
+/// 권한을 요청한다. 첫 실행이면 시스템 대화상자가 뜬다. 이미 허용됐으면 조용히 넘어간다.
+/// 반환값은 launchd 시작 직후 오탐이 있어 믿지 않는다 — 실제 권한은 제목이 찍히는지로 판정한다.
 #[cfg(target_os = "macos")]
-pub fn screen_capture_allowed() -> bool {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGPreflightScreenCaptureAccess() -> bool;
-    }
-    unsafe { CGPreflightScreenCaptureAccess() }
-}
-
-/// 권한을 요청한다. 없으면 시스템 대화상자가 뜨고, 사용자가 허용하면 다음 실행부터 적용된다.
-#[cfg(target_os = "macos")]
-pub fn request_screen_capture() -> bool {
+pub fn request_screen_capture() {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGRequestScreenCaptureAccess() -> bool;
     }
-    unsafe { CGRequestScreenCaptureAccess() }
+    unsafe {
+        CGRequestScreenCaptureAccess();
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn screen_capture_allowed() -> bool {
-    true
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn request_screen_capture() -> bool {
-    true
-}
+pub fn request_screen_capture() {}

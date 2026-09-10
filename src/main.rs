@@ -251,11 +251,10 @@ fn watch(db: &Connection) {
     let mut tracker = Tracker::new(IDLE_BREAK_S);
     let mut open: Option<(i64, Key, i64)> = None; // (행 id, 구간 열쇠, 누적 입력 시간)
     eprintln!("desklog watch — {} (Ctrl-C로 중지)", db_path().display());
-    // preflight 는 launchd 시작 직후 권한이 있어도 false 를 돌려주는 오탐이 있다.
-    // request 는 실제 상태를 반영하고, 이미 허용됐으면 대화상자 없이 true 만 준다.
-    if !platform::request_screen_capture() {
-        eprintln!("화면 기록 권한이 없다 — 창 제목을 못 읽고 앱 이름만 남는다. 시스템 대화상자에서 허용하면 다음 실행부터 적용된다.");
-    }
+    // 첫 실행이면 권한 대화상자를 띄운다. launchd 시작 직후엔 preflight·request 둘 다
+    // 권한이 있어도 false 를 주는 오탐이 있어, 반환값으로 '권한 없음'을 단정하지 않는다.
+    // 실제 권한 여부는 제목이 찍히는지로만 알 수 있고, 그 판정은 doctor 가 한다.
+    platform::request_screen_capture();
     loop {
         let t = unix_now();
         let idle = platform::idle_seconds();
@@ -827,33 +826,21 @@ fn doctor(db: &Connection) {
         None => println!("수집기      ✗ 기록이 하나도 없다 — desklog watch 를 띄워라"),
     }
 
-    if platform::screen_capture_allowed() {
-        println!("화면 기록    허용 — 창 제목을 읽는다");
-    } else {
-        println!("화면 기록    ✗ 없음 — 창 제목을 못 읽는다 (앱 이름은 읽는다)");
-        println!("             시스템 설정 → 개인정보 보호 및 보안 → 화면 기록 → + → 위 실행 파일 추가");
-        println!("             brew 로 올릴 때마다 경로가 바뀌어 다시 추가해야 한다");
-    }
-
-    // 최근 15분, 잠기지 않은 구간 중 제목 없는 비율. 권한 여부와 실제가 맞는지 본다.
-    // 한 시간으로 잡으면 권한을 주고 재시작한 직후에도 옛 기록이 남아 여전히 문제라고 말한다.
-    let (all, none): (i64, i64) = db
+    // 권한 판정은 경험적으로 한다. 권한이 없으면 어떤 앱도 영영 제목이 안 나온다.
+    // preflight·request 는 launchd 시작 직후 오탐이 있어 믿지 않는다.
+    let titled: i64 = db
         .query_row(
-            "SELECT COALESCE(SUM(end_t-start_t+5),0),
-                    COALESCE(SUM(CASE WHEN title IS NULL THEN end_t-start_t+5 ELSE 0 END),0)
-             FROM spans WHERE end_t >= ?1 AND locked=0",
-            [now - 900],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            "SELECT COUNT(*) FROM spans WHERE title IS NOT NULL AND end_t >= ?1",
+            [now - 86400],
+            |r| r.get(0),
         )
-        .unwrap_or((0, 0));
-    if all > 0 {
-        let pct = none * 100 / all;
-        println!("최근 15분    제목 없는 비율 {pct}%");
-        // 이 명령은 터미널 권한으로 돌고, 수집기는 launchd 권한으로 돈다. 둘이 다를 수 있다.
-        if pct >= 90 && platform::screen_capture_allowed() {
-            println!("             ✗ 여기서는 권한이 있는데 기록에는 제목이 없다 — 수집기가 다른 권한 맥락(launchd)에서 돌고 있다");
-            println!("             brew services 로 띄운 실행 파일에 따로 권한을 줘야 한다: $(brew --prefix)/opt/desklog/bin/desklog");
-        }
+        .unwrap_or(0);
+    if titled > 0 {
+        println!("화면 기록    허용 — 최근 24h 제목 있는 구간 {titled}개");
+    } else {
+        println!("화면 기록    ✗ 없음 — 최근 24h 제목이 하나도 안 찍혔다 (앱 이름은 읽는다)");
+        println!("             시스템 설정 → 개인정보 보호 및 보안 → 화면 기록 → + → 위 실행 파일 추가");
+        println!("             brew 로 판을 올려도 서명이 같아 권한은 유지된다. 첫 허용만 필요하다");
     }
 
     let (app, title) = platform::active_window().unwrap_or(("(못 읽음)".into(), None));
