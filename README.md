@@ -62,11 +62,35 @@ desklog focus [일수]       한 앱 능동 사용 구간 — 오래 머물며 �
 desklog note [앱] [설명]   앱 사용 패턴을 적거나 본다
 desklog doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지
 desklog update             최신판으로 올리고 수집기를 다시 띄운다
-desklog label yes|no       라벨 기록
+desklog label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
 desklog export             학습용 CSV
 
 desklog <읽기명령> --json   top·focus·note·log 을 JSON 으로 (기계·AI 소비용)
 ```
+
+`label`은 시각과 yes/no 만 `labels` 표에 남긴다. 개입하는 쪽(로봇·AI)이 개입 직후 결과를 적고,
+`export`의 구간 기록과 시각으로 맞춰 학습 데이터로 쓴다.
+
+### `now` 출력 필드
+
+로봇·AI 가 가장 자주 부르는 명령이다. watch 가 마지막으로 쓴 구간을 JSON 한 줄로 낸다.
+
+```json
+{"t":1790176088,"age_s":1,"app":"카카오톡","title":"김보라","idle_s":11.6,"hour":0,
+ "session_s":661,"app_s":120,"span_s":45,"span_active_s":40,"locked":false}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `t` | 마지막 기록 시각 (유닉스 초) |
+| `age_s` | 마지막 기록 이후 지난 초. 10초를 넘으면 watch 가 죽었다 |
+| `app` `title` | 최전면 앱, 창 제목 (`title`은 권한이 없으면 `null`) |
+| `idle_s` | 마지막 키보드·마우스 입력 이후 초 |
+| `hour` | 지역시 '시' |
+| `session_s` | 5분 넘는 무입력 없이 이어진 시간. 지금 5분 넘게 입력이 없으면 0 |
+| `app_s` | 지금 앱을 연속으로 쓴 시간 |
+| `span_s` `span_active_s` | 지금 구간(앱·제목·시·세션·잠금이 같은 동안)의 길이와 그중 입력 있던 시간 |
+| `locked` | 화면이 잠겼거나 꺼져 있다 |
 
 `brew services`를 쓰지 않고 직접 띄우려면:
 
@@ -231,13 +255,31 @@ FROM spans GROUP BY 날짜 ORDER BY 날짜 DESC;
 대화 상대 이름인 식이다. 본인 컴퓨터를 본인이 관측하는 것 말고 다른 용도로 쓴다면
 창 제목을 그대로 저장할지 패턴만 남길지 먼저 정해야 한다.
 
+## 기록 지우기
+
+```
+brew services stop desklog
+rm ~/.desklog.db                  # 전부 지운다. 다음 watch 가 빈 파일을 새로 만든다
+brew services start desklog
+```
+
+일부만 지우려면 sqlite 로 지운다:
+
+```
+sqlite3 ~/.desklog.db "DELETE FROM spans WHERE app='카카오톡'"          # 한 앱
+sqlite3 ~/.desklog.db "UPDATE spans SET title=NULL WHERE app='카카오톡'" # 제목만
+```
+
 ## OS별로 갈리는 곳
 
-`src/platform.rs` 한 파일, 함수 두 개가 전부다.
+`src/platform.rs` 한 파일이 전부다.
 
 ```rust
-pub fn active_window() -> Option<(String, Option<String>)>
-pub fn idle_seconds() -> f64
+pub fn active_window() -> Option<(String, Option<String>)>  // 최전면 앱, 창 제목
+pub fn frontmost_app() -> Option<String>                     // 창 조회가 실패할 때 앱 이름만
+pub fn idle_seconds() -> f64                                 // 마지막 입력 이후 초
+pub fn screen_locked() -> bool                               // 화면 잠김·꺼짐
+pub fn request_screen_capture()                              // macOS 화면 기록 권한 요청
 ```
 
 나머지는 OS를 모른다. 실제로 다른 것은 하나 — macOS는 다른 앱의 창 제목을 읽으려면
@@ -253,17 +295,15 @@ CLI 도구의 화면 기록 권한은 실행 파일이 아니라 **띄운 부모
 터미널에서 실행하면 터미널의 권한을 물려받지만, `brew services`(launchd)로 띄우면
 물려받을 권한이 없어서 `title`이 `NULL`로 온다.
 
-그래서 `watch`는 시작할 때 권한이 없으면 요청한다. **시스템 대화상자가 뜨면 허용하고
-`brew services restart desklog`** 하면 그때부터 제목이 읽힌다. 확인은 `desklog doctor`.
+그래서 `watch`는 시작할 때 권한을 요청한다. **시스템 대화상자가 뜨면 허용하고
+`brew services restart desklog`** 하면 그때부터 제목이 읽힌다. 확인은 `desklog doctor` —
+최근 24시간에 제목이 찍힌 구간이 있는지로 판정한다.
+
+0.5.2 부터는 서명한 `.app` 번들(`com.wis-graph.desklog`)로 배포한다. macOS 가 번들 식별자로
+권한을 묶으므로 판을 올려도 권한을 다시 묻지 않는다. 그 전 판은 판마다 화면 기록 목록에
+항목이 새로 생겼다 — 옛 항목은 지우고 한 번만 허용하면 된다.
 
 앱 이름은 권한과 무관하다 — 창 조회가 실패하면 `NSWorkspace`에 최전면 앱을 따로 묻는다.
-
-0.3.0 부터는 서명본을 배포하므로 판을 올려도 권한이 유지된다.
-
-무엇이 읽히는지 확인하려면 `desklog doctor`. 터미널에서는 권한이 있는데 기록에 제목이
-없으면, 수집기가 다른 권한 맥락(launchd)에서 돌고 있다고 짚어준다.
-`watch`는 시작할 때 권한이 없으면 요청하므로, `brew services start` 뒤에 시스템 대화상자가
-뜨면 허용하고 `brew services restart desklog` 하면 된다.
 
 원시 값을 보려면 `cargo run --release --example probe`.
 

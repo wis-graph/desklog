@@ -46,7 +46,8 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   -v, --version      판 번호
 
 상주시키기:
-  nohup desklog watch > /tmp/desklog.log 2>&1 &
+  brew services start desklog                    brew 설치본. 로그인할 때 자동으로 뜬다
+  nohup desklog watch > /tmp/desklog.log 2>&1 &  직접 띄울 때. 재부팅하면 다시 띄운다
 
 기록하는 것:
   활성 앱 이름, 창 제목, 마지막 입력 이후 경과 초, 지역시 '시',

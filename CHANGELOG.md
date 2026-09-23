@@ -6,6 +6,8 @@
 
 ## 미출시
 
+- help 의 '상주시키기'에 `brew services start desklog` 를 먼저 안내한다.
+
 ## 0.6.1 (2026-09-24)
 
 - **watch 가 앱 전환을 잡지 못하던 버그를 고쳤다.** macOS 의 최전면 앱 값(NSWorkspace)은
