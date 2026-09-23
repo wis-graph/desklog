@@ -25,6 +25,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   live               현재 상태를 1초마다 갱신한다
   log [개수]         원시 기록을 훑어본다 (기본 40). 끊긴 구간을 표시한다
   top [일수] [앱]    앱별 시간·시간대·창 제목 요약 (기본 7일, 앱을 주면 그 앱만)
+  note [앱] [설명]   앱 사용 패턴을 적거나 본다 (아래 '집중'에 대하여)
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
   doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지 진단한다
@@ -53,6 +54,13 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   한 창 안의 딴짓은 능동 사용으로 잘못 잡는다.
   집중 여부는 '어떤 앱이 집중 작업인가'를 사용자가 정하는 해석의 문제다.
   focus 는 그 판단의 재료(한 앱 능동 사용 구간)를 줄 뿐, 판단하지 않는다.
+
+  이 앱의 운영자는 대개 AI 다. 집중밀도를 추정하려면 알고리즘이 아니라 인터뷰로 한다:
+    1) desklog top      — 이 사람이 주로 쓰는 앱을 조회한다
+    2) 사람에게 묻는다  — 그 앱에서 무엇을, 어떻게 쓰는가 (작업? 딴짓? 읽기 위주?)
+    3) desklog note <앱> <답>  — 답을 적어 둔다
+    4) 다음부터 top 이 숫자 옆에 그 패턴을 함께 보여준다. 숫자+패턴을 읽고 해석한다
+  desklog 는 재료(숫자)와 메모(패턴)를 나란히 놓아 줄 뿐, 집중밀도는 해석하는 쪽이 매긴다.
 ";
 
 fn main() {
@@ -92,6 +100,7 @@ fn main() {
             args.get(2).map(String::as_str),
         ),
         "label" => label(&db, args.get(1).map(String::as_str)),
+        "note" => note(&db, args.get(1).map(String::as_str), args.get(2..).unwrap_or(&[])),
         "export" => export(&db),
         "doctor" => doctor(&db),
         "focus" => focus(&db, args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7)),
@@ -133,6 +142,11 @@ fn open_db() -> Connection {
          CREATE TABLE IF NOT EXISTS labels (
             t      INTEGER PRIMARY KEY,
             worked INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS app_notes (
+            app     TEXT PRIMARY KEY,   -- 이 앱을 이 사람이 어떻게 쓰는가 (인터뷰 결과)
+            note    TEXT NOT NULL,
+            updated INTEGER NOT NULL
          );",
     )
     .expect("스키마 생성 실패");
@@ -364,6 +378,74 @@ fn label(db: &Connection, arg: Option<&str>) {
     .expect("라벨 기록 실패");
 }
 
+/// 한 앱의 사용 패턴 메모를 읽는다. 없으면 None.
+fn app_note(db: &Connection, app: &str) -> Option<String> {
+    db.query_row(
+        "SELECT note FROM app_notes WHERE app = ?1",
+        [app],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+// 앱 사용 패턴을 기록·조회한다.
+//
+// desklog 는 '집중'을 판별하지 못한다(같은 이름의 명령 참고). 대신 이 앱의 운영자인 AI 가
+// 주요 사용 앱을 조회하고(top), 그 앱을 이 사람이 어떻게 쓰는지 인터뷰해서 여기 적어 둔다.
+// 다음부터 top 이 숫자 옆에 이 메모를 함께 보여주므로, 숫자+메모를 읽은 AI 가 집중밀도를
+// 추정할 수 있다. 판별은 desklog 가 아니라 그 해석이 한다.
+//
+//   desklog note                    적힌 패턴을 모두 본다
+//   desklog note <앱>               그 앱의 패턴을 본다
+//   desklog note <앱> <설명...>     그 앱의 패턴을 적는다(덮어쓴다)
+//   desklog note <앱> -             그 앱의 패턴을 지운다
+fn note(db: &Connection, app: Option<&str>, rest: &[String]) {
+    let Some(app) = app else {
+        // 인자 없음: 전부 나열
+        let mut stmt = db
+            .prepare("SELECT app, note FROM app_notes ORDER BY app")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .flatten()
+            .collect();
+        if rows.is_empty() {
+            println!("적힌 패턴이 없다. 'desklog top' 으로 주요 앱을 보고, 그 앱을 어떻게 쓰는지");
+            println!("인터뷰해서 'desklog note <앱> <설명>' 으로 적어 둔다.");
+            return;
+        }
+        for (a, n) in rows {
+            println!("  {:<20} {}", trunc(&a, 20), n);
+        }
+        return;
+    };
+
+    if rest.is_empty() {
+        // 앱만: 그 앱 메모 조회
+        match app_note(db, app) {
+            Some(n) => println!("{n}"),
+            None => println!("'{app}' 에 적힌 패턴이 없다."),
+        }
+        return;
+    }
+
+    if rest.len() == 1 && rest[0] == "-" {
+        db.execute("DELETE FROM app_notes WHERE app = ?1", [app])
+            .expect("패턴 삭제 실패");
+        println!("'{app}' 패턴을 지웠다.");
+        return;
+    }
+
+    let text = rest.join(" ");
+    db.execute(
+        "INSERT OR REPLACE INTO app_notes (app, note, updated) VALUES (?1, ?2, ?3)",
+        rusqlite::params![app, text, unix_now()],
+    )
+    .expect("패턴 기록 실패");
+    println!("'{app}' ← {text}");
+}
+
 fn export(db: &Connection) {
     println!("start_t,end_t,len_s,app,title,hour,active_s,idle_s,session_s,app_s,locked");
     let mut stmt = db
@@ -470,6 +552,10 @@ fn top(db: &Connection, days: i64, only: Option<&str>) {
             dur(*l),
             bar(*ty, max, 24)
         );
+        // 인터뷰로 저장된 사용 패턴이 있으면 숫자 밑에 붙인다. 해석의 재료다.
+        if let Some(n) = app_note(db, app) {
+            println!("  {:<20}   └ {}", "", trunc(&n, 60));
+        }
     }
 
     println!("\n시간대  (입력 있던 시간)");
@@ -1008,8 +1094,22 @@ mod tests {
     }
 
     #[test]
+    fn app_note_roundtrip() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_notes (app TEXT PRIMARY KEY, note TEXT NOT NULL, updated INTEGER NOT NULL);",
+        )
+        .unwrap();
+        assert_eq!(app_note(&db, "Cursor"), None);
+        note(&db, Some("Cursor"), &["작업".into(), "앱".into()]);
+        assert_eq!(app_note(&db, "Cursor").as_deref(), Some("작업 앱"));
+        note(&db, Some("Cursor"), &["-".into()]); // 삭제
+        assert_eq!(app_note(&db, "Cursor"), None);
+    }
+
+    #[test]
     fn help_lists_every_command() {
-        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor", "focus"] {
+        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor", "focus", "note"] {
             assert!(HELP.contains(cmd), "도움말에 {cmd} 가 빠졌다");
         }
         assert!(HELP.contains("--help") && HELP.contains("--version"));
