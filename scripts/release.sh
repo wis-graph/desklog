@@ -73,32 +73,53 @@ python3 scripts/bump.py "$CUR" "$NEW" "$TODAY"
 grep -q "^version = \"$NEW\"$" Cargo.toml || die "Cargo.toml 판 번호가 안 바뀌었다"
 grep -q "^## $NEW ($TODAY)$" CHANGELOG.md || die "CHANGELOG 절이 안 만들어졌다"
 
-# ---- universal 빌드 ----
+# ---- universal 빌드 → .app 번들 ----
+# 단독 실행파일은 화면 기록 권한(TCC)을 경로/해시별로 등록해서 판마다 다시 묻는다.
+# .app 번들로 감싸면 TCC 가 안정적인 번들 식별자로 묶어 업데이트해도 항목 하나로 유지된다.
 say "빌드 arm64 + x86_64"
 "$CARGO" build --release --quiet
 "$CARGO" build --release --quiet --target x86_64-apple-darwin
-OUT=target/universal; mkdir -p "$OUT"
-lipo -create target/release/desklog target/x86_64-apple-darwin/release/desklog -output "$OUT/desklog"
-[ "$("$OUT/desklog" --version)" = "desklog $NEW" ] || die "바이너리가 $NEW 를 말하지 않는다"
+OUT=target/universal; rm -rf "$OUT"; mkdir -p "$OUT"
+APP="$OUT/desklog.app"
+mkdir -p "$APP/Contents/MacOS"
+lipo -create target/release/desklog target/x86_64-apple-darwin/release/desklog \
+  -output "$APP/Contents/MacOS/desklog"
+[ "$("$APP/Contents/MacOS/desklog" --version)" = "desklog $NEW" ] || die "바이너리가 $NEW 를 말하지 않는다"
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$SIGN_ID</string>
+  <key>CFBundleName</key><string>desklog</string>
+  <key>CFBundleExecutable</key><string>desklog</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$NEW</string>
+  <key>CFBundleVersion</key><string>$NEW</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+</dict></plist>
+PLIST
 
-# ---- 서명·공증 ----
+# ---- 서명·공증 (번들 단위) ----
 say "서명 ($SIGN_ID)"
 codesign --force --options runtime --timestamp --identifier "$SIGN_ID" \
-  --sign "$APPLE_SIGNING_IDENTITY" "$OUT/desklog"
-codesign --verify --strict "$OUT/desklog" || die "서명 검증 실패"
-SIGINFO=$(codesign -dv "$OUT/desklog" 2>&1)
+  --sign "$APPLE_SIGNING_IDENTITY" "$APP"
+codesign --verify --strict "$APP" || die "서명 검증 실패"
+SIGINFO=$(codesign -dv "$APP" 2>&1)
 grep -q "Identifier=$SIGN_ID" <<<"$SIGINFO" || die "식별자가 $SIGN_ID 가 아니다"
 grep -q "TeamIdentifier=$APPLE_TEAM_ID" <<<"$SIGINFO" || die "Team ID 가 다르다"
 
 say "공증 (몇 분 걸린다)"
 rm -f "$OUT/desklog.zip"
-ditto -c -k --keepParent "$OUT/desklog" "$OUT/desklog.zip"
+ditto -c -k --keepParent "$APP" "$OUT/desklog.zip"
 xcrun notarytool submit "$OUT/desklog.zip" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
   --team-id "$APPLE_TEAM_ID" --wait 2>&1 | tee "$OUT/notarize.log" | grep -E "status:" | tail -1
 grep -q "status: Accepted" "$OUT/notarize.log" || die "공증이 거절됐다 — $OUT/notarize.log"
+# 스테이플: 오프라인에서도 공증 확인이 되도록 티켓을 번들에 박는다
+xcrun stapler staple "$APP" || die "스테이플 실패"
 
 ASSET="desklog-$NEW-macos-universal.tar.gz"
-tar -czf "$OUT/$ASSET" -C "$OUT" desklog
+tar -czf "$OUT/$ASSET" -C "$OUT" desklog.app
 SHA=$(shasum -a 256 "$OUT/$ASSET" | cut -d' ' -f1)
 
 # ---- 커밋·태그·푸시·릴리스 ----
@@ -119,7 +140,7 @@ brew update && brew upgrade wis-graph/tap/desklog
 brew services restart desklog
 \`\`\`
 
-macOS universal (arm64 + x86_64), Developer ID 서명·공증. sha256 \`$SHA\`"
+macOS universal .app 번들 (arm64 + x86_64), Developer ID 서명·공증·스테이플. sha256 \`$SHA\`"
 say "릴리스 생성 (바이너리 첨부)"
 
 # ---- 탭 formula: 통째로 다시 쓴다. 줄 하나씩 고치다 어긋난 적이 있다 ----
@@ -135,16 +156,19 @@ class Desklog < Formula
   version "$NEW"
   license "MIT"
 
-  # 미리 빌드해 Developer ID 로 서명·공증한 universal 바이너리를 받는다.
-  # 소스 빌드로 바꾸면 서명이 사라지고 화면 기록 권한을 판마다 다시 묻게 된다.
+  # 미리 빌드해 Developer ID 로 서명·공증한 .app 번들을 받는다.
+  # 단독 실행파일이면 화면 기록 권한(TCC)을 판마다 다시 묻는다 — 번들이라야 식별자로 묶인다.
   depends_on :macos
 
   def install
-    bin.install "desklog"
+    libexec.install "desklog.app"
+    # CLI 는 번들 안 실행파일을 가리킨다. TCC 는 이 실행파일에서 번들을 거슬러 올라
+    # 안정적인 번들 식별자로 권한을 묶으므로, 판을 올려도 항목이 하나로 유지된다.
+    bin.install_symlink libexec/"desklog.app/Contents/MacOS/desklog"
   end
 
   service do
-    run [opt_bin/"desklog", "watch"]
+    run [opt_libexec/"desklog.app/Contents/MacOS/desklog", "watch"]
     keep_alive true
     log_path var/"log/desklog.log"
     error_log_path var/"log/desklog.log"
