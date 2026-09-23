@@ -4,7 +4,15 @@
 mod platform;
 
 use rusqlite::Connection;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// --json 이 주어졌는가. 읽기 명령(top·focus·note·log)이 사람용 표 대신 JSON 을 낸다.
+/// 이 앱의 소비자는 대개 AI 라, 기계가 읽을 출력을 둔다. CLI 출력 모드라 전역이 맞다.
+static JSON_OUT: AtomicBool = AtomicBool::new(false);
+fn json_out() -> bool {
+    JSON_OUT.load(Ordering::Relaxed)
+}
 
 /// 몇 초마다 한 줄 남길지. 상태는 수십 초 단위로 바뀌니 5초면 충분하다.
 const SAMPLE_S: u64 = 5;
@@ -32,6 +40,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   focus [일수]       한 앱 능동 사용 구간 — 오래 머물며 입력한 시간 (기본 7일)
 
 옵션:
+  --json             top·focus·note·log 을 JSON 으로 낸다 (기계·AI 소비용)
   -h, --help         이 도움말
   -v, --version      판 번호
 
@@ -81,7 +90,12 @@ fn main() {
         signal(SIGPIPE, SIG_DFL);
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // --json 은 어느 자리에 오든 걷어내고 전역 플래그로 세운다.
+    if let Some(i) = args.iter().position(|a| a == "--json") {
+        args.remove(i);
+        JSON_OUT.store(true, Ordering::Relaxed);
+    }
     match args.first().map(String::as_str) {
         None | Some("-h") | Some("--help") | Some("help") => {
             print!("{HELP}");
@@ -408,19 +422,27 @@ fn note(db: &Connection, app: Option<&str>, rest: &[String]) {
     let Some(app) = app else {
         // 인자 없음: 전부 나열
         let mut stmt = db
-            .prepare("SELECT app, note FROM app_notes ORDER BY app")
+            .prepare("SELECT app, note, updated FROM app_notes ORDER BY app")
             .unwrap();
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
             .flatten()
             .collect();
+        if json_out() {
+            let arr: Vec<_> = rows
+                .iter()
+                .map(|(a, n, u)| serde_json::json!({"app": a, "note": n, "updated": u}))
+                .collect();
+            println!("{}", serde_json::json!({ "notes": arr }));
+            return;
+        }
         if rows.is_empty() {
             println!("적힌 패턴이 없다. 'desklog top' 으로 주요 앱을 보고, 그 앱을 어떻게 쓰는지");
             println!("인터뷰해서 'desklog note <앱> <설명>' 으로 적어 둔다.");
             return;
         }
-        for (a, n) in rows {
+        for (a, n, _) in rows {
             println!("  {:<20} {}", trunc(&a, 20), n);
         }
         return;
@@ -428,9 +450,14 @@ fn note(db: &Connection, app: Option<&str>, rest: &[String]) {
 
     if rest.is_empty() {
         // 앱만: 그 앱 메모 조회
-        match app_note(db, app) {
-            Some(n) => println!("{n}"),
-            None => println!("'{app}' 에 적힌 패턴이 없다."),
+        let n = app_note(db, app);
+        if json_out() {
+            println!("{}", serde_json::json!({"app": app, "note": n}));
+        } else {
+            match n {
+                Some(n) => println!("{n}"),
+                None => println!("'{app}' 에 적힌 패턴이 없다."),
+            }
         }
         return;
     }
@@ -486,7 +513,79 @@ fn export(db: &Connection) {
 /// 구간 길이. 한 틱짜리 구간도 SAMPLE_S 만큼으로 센다.
 const LEN: &str = "SUM(end_t - start_t + 5)";
 
+/// top 의 JSON 판. 사람용 표와 같은 숫자를 기계가 읽을 형태로 낸다.
+// ponytail: 사람용 top 과 SQL 이 겹치지만, 검증된 human 경로를 안 건드리려 따로 뒀다.
+fn top_json(db: &Connection, days: i64, only: Option<&str>) {
+    let since = unix_now() - days * 86400;
+    let only_s = only.unwrap_or("");
+    let (filter, params): (String, Vec<&dyn rusqlite::ToSql>) = if only.is_some() {
+        (" AND app = ?2".into(), vec![&since, &only_s])
+    } else {
+        (String::new(), vec![&since])
+    };
+    let p = params.as_slice();
+
+    let (total, typed, locked_s): (i64, i64, i64) = db
+        .query_row(
+            &format!(
+                "SELECT COALESCE(SUM(CASE WHEN locked=0 THEN end_t-start_t+5 ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN locked=0 THEN active_s ELSE 0 END),0),
+                        COALESCE(SUM(CASE WHEN locked=1 THEN end_t-start_t+5 ELSE 0 END),0)
+                 FROM spans WHERE end_t >= ?1{filter}"
+            ),
+            p,
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap_or((0, 0, 0));
+
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT app, {LEN} l, SUM(active_s) a FROM spans WHERE end_t >= ?1 AND locked=0{filter}
+             GROUP BY app ORDER BY a DESC LIMIT 12"
+        ))
+        .unwrap();
+    let apps: Vec<_> = stmt
+        .query_map(p, |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2).unwrap_or(0)))
+        })
+        .unwrap()
+        .flatten()
+        .map(|(app, front, input)| {
+            serde_json::json!({
+                "app": app, "input_s": input, "frontmost_s": front, "note": app_note(db, &app),
+            })
+        })
+        .collect();
+
+    let mut stmt = db
+        .prepare(&format!(
+            "SELECT hour, SUM(active_s) FROM spans WHERE end_t >= ?1 AND locked=0{filter} GROUP BY hour"
+        ))
+        .unwrap();
+    let hours: Vec<_> = stmt
+        .query_map(p, |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .unwrap()
+        .flatten()
+        .map(|(h, s)| serde_json::json!({"hour": h, "input_s": s}))
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "days": days,
+            "app": only,
+            "totals": {"input_s": typed, "frontmost_s": total, "locked_s": locked_s},
+            "basis": "input_s",  // 정렬·해석 기준은 입력 시간이다 (최전면 아님)
+            "apps": apps,
+            "hours": hours,
+        })
+    );
+}
+
 fn top(db: &Connection, days: i64, only: Option<&str>) {
+    if json_out() {
+        return top_json(db, days, only);
+    }
     let since = unix_now() - days * 86400;
     // 앱을 지정하면 모든 집계를 그 앱으로 좁힌다.
     let only_s = only.unwrap_or("");
@@ -624,6 +723,20 @@ fn log(db: &Connection, n: i64) {
         .unwrap()
         .flatten()
         .collect();
+    if json_out() {
+        let arr: Vec<_> = rows
+            .iter()
+            .rev()
+            .map(|(s, e, app, title, active, locked)| {
+                serde_json::json!({
+                    "start_t": s, "end_t": e, "len_s": e - s + SAMPLE_S as i64,
+                    "app": app, "title": title, "active_s": active, "locked": locked,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "spans": arr }));
+        return;
+    }
     if rows.is_empty() {
         println!("기록 없음. desklog watch 를 먼저 띄워라.");
         return;
@@ -833,6 +946,38 @@ fn focus(db: &Connection, days: i64) {
     }
 
     let blocks: Vec<Block> = build_blocks(&rows).into_iter().filter(is_focus).collect();
+
+    if json_out() {
+        let arr: Vec<_> = blocks
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "start_t": b.start_t,
+                    "end_t": b.end_t,
+                    "len_s": b.len_s(),
+                    "app": b.app,
+                    "active_s": b.active_s,
+                    "active_pct": b.active_pct(),
+                    "top_title": b.top_title(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "days": days,
+                "params": {
+                    "min_s": FOCUS_MIN_S,
+                    "min_active_pct": FOCUS_MIN_ACTIVE_PCT,
+                    "gap_tolerance_s": FOCUS_GAP_TOLERANCE_S,
+                },
+                "note": "능동 사용 구간이다. 집중 여부는 읽는 쪽이 판단한다.",
+                "blocks": arr,
+            })
+        );
+        return;
+    }
+
     println!(
         "\n최근 {days}일 · 한 앱에 {}분 이상, 그중 입력 {}% 이상, {}초 이하 딴짓은 무시\n\
          (능동 사용 구간이다. 어떤 앱이 '집중'인지는 보는 사람이 정한다 — desklog --help)\n",

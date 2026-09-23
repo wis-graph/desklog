@@ -6,6 +6,11 @@
 
 ## 미출시
 
+- **`--json`** — top·focus·note·log 을 JSON 으로 낸다. 이 앱의 소비자는 대개 AI 라
+  기계가 읽을 출력을 뒀다. top JSON 은 앱별 input_s/frontmost_s 와 note 를 함께 실어,
+  자동화 앱을 빼고 해석하기 쉽게 한다. now 는 원래부터 JSON, export 는 CSV 로 유지.
+  serde_json 으로 직렬화해 중첩·이스케이프를 안전하게 처리한다.
+
 ## 0.4.2 (2026-09-23)
 
 - help 에 한 줄 더: 합성 입력의 근본 해결은 카메라 재석 감지(공석인데 입력=자동화)이며,

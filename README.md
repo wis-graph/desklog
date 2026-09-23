@@ -53,6 +53,8 @@ desklog note [앱] [설명]   앱 사용 패턴을 적거나 본다
 desklog doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지
 desklog label yes|no       라벨 기록
 desklog export             학습용 CSV
+
+desklog <읽기명령> --json   top·focus·note·log 을 JSON 으로 (기계·AI 소비용)
 ```
 
 `brew services`를 쓰지 않고 직접 띄우려면:
@@ -132,6 +134,39 @@ Chrome은 최전면 27시간, 입력 7분이다 — 창을 켜둔 채 자리를 
 
 desklog 는 숫자(재료)와 패턴(인터뷰 결과)을 나란히 놓아 줄 뿐, **집중밀도는 그걸 읽은 AI 가 매긴다.**
 desklog 가 판별하지 않는다는 원칙은 그대로다 — 판별의 재료를 한자리에 모아 둘 뿐이다.
+
+## JSON 출력 — AI 소비용
+
+이 앱의 데이터 소비자는 대개 AI(Claude·ChatGPT)다. 읽기 명령에 `--json` 을 붙이면
+사람용 표 대신 기계가 읽을 JSON 을 낸다.
+
+```
+desklog top 7 --json      앱별 input_s/frontmost_s(+note), 시간대별 input_s
+desklog top 7 Cursor --json   그 앱만
+desklog focus 7 --json    능동 사용 구간 배열 (start_t·len_s·app·active_pct·top_title)
+desklog note --json       앱별 사용 패턴
+desklog log 40 --json     원시 구간 배열
+```
+
+정렬·해석 기준은 `input_s`(입력 시간)다 — `top` JSON 의 `basis` 필드가 이를 밝힌다.
+`now` 는 원래부터 JSON 이라 `--json` 이 필요 없다. `export`(CSV)는 표계산기용으로 그대로 둔다.
+
+예 — `top --json`:
+
+```json
+{
+  "days": 7, "basis": "input_s",
+  "totals": { "input_s": 66234, "frontmost_s": 605343, "locked_s": 0 },
+  "apps": [
+    { "app": "캘린더", "input_s": 126760, "frontmost_s": 605343,
+      "note": "AI 자동화가 처리. 입력=합성 이벤트지 사람 아님. 집중 계산에서 제외" }
+  ],
+  "hours": [ { "hour": 0, "input_s": 12830 }, ... ]
+}
+```
+
+숫자(재료)와 note(인터뷰 결과)가 한 응답에 같이 오므로, AI 가 자동화 앱을 빼고
+집중밀도를 해석할 수 있다. desklog 는 여전히 판별하지 않는다.
 
 ## 직접 조회
 
