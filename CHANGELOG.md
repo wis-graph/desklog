@@ -6,6 +6,8 @@
 
 ## 미출시
 
+## 0.5.0 (2026-09-23)
+
 - **`--json`** — top·focus·note·log 을 JSON 으로 낸다. 이 앱의 소비자는 대개 AI 라
   기계가 읽을 출력을 뒀다. top JSON 은 앱별 input_s/frontmost_s 와 note 를 함께 실어,
   자동화 앱을 빼고 해석하기 쉽게 한다. now 는 원래부터 JSON, export 는 CSV 로 유지.
