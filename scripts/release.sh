@@ -119,7 +119,10 @@ grep -q "status: Accepted" "$OUT/notarize.log" || die "공증이 거절됐다 �
 xcrun stapler staple "$APP" || die "스테이플 실패"
 
 ASSET="desklog-$NEW-macos-universal.tar.gz"
-tar -czf "$OUT/$ASSET" -C "$OUT" desklog.app
+# Homebrew 는 tarball 최상위가 디렉터리 하나뿐이면 그걸 벗겨낸다(source tarball 관행).
+# 그러면 desklog.app 이 사라지고 Contents 만 남아 install 이 깨진다. 파일 하나를 더 둬서 막는다.
+echo "$NEW" > "$OUT/VERSION"
+tar -czf "$OUT/$ASSET" -C "$OUT" desklog.app VERSION
 SHA=$(shasum -a 256 "$OUT/$ASSET" | cut -d' ' -f1)
 
 # ---- 커밋·태그·푸시·릴리스 ----
