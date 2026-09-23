@@ -37,6 +37,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
   doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지 진단한다
+  update             최신판으로 올리고 수집기를 다시 띄운다 (brew 설치본)
   focus [일수]       한 앱 능동 사용 구간 — 오래 머물며 입력한 시간 (기본 7일)
 
 옵션:
@@ -122,6 +123,7 @@ fn main() {
         "note" => note(&db, args.get(1).map(String::as_str), args.get(2..).unwrap_or(&[])),
         "export" => export(&db),
         "doctor" => doctor(&db),
+        "update" => update(),
         "focus" => focus(&db, args.get(1).and_then(|s| s.parse().ok()).unwrap_or(7)),
         other => {
             eprintln!("모르는 명령: {other}\n");
@@ -1052,6 +1054,57 @@ fn hhmm(t: i64) -> String {
     format!("{:02}:{:02}", s / 3600, (s % 3600) / 60)
 }
 
+/// 최신판으로 올리고 수집기를 다시 띄운다.
+///
+/// 판을 올린 뒤 재시작을 빼먹으면 옛 바이너리가 계속 돌기 때문에 한 명령으로 묶는다.
+/// 스스로 판을 확인하러 나가지는 않는다 — 부를 때만 brew 를 시킨다(README 의 약속).
+fn update() {
+    fn run(cmd: &str, args: &[&str]) -> bool {
+        eprintln!("▸ {cmd} {}", args.join(" "));
+        std::process::Command::new(cmd)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    if std::process::Command::new("brew")
+        .arg("--prefix")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        println!("brew 를 찾을 수 없다. 소스에서 설치했다면 저장소에서 직접 올린다:");
+        println!("  git pull && cargo build --release");
+        return;
+    }
+
+    // 서비스로 돌고 있었는지 미리 본다. 안 돌고 있었으면 멋대로 띄우지 않는다.
+    let was_running = std::process::Command::new("brew")
+        .args(["services", "list"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.contains("desklog") && l.contains("started"))
+        })
+        .unwrap_or(false);
+
+    if !run("brew", &["update"]) {
+        eprintln!("✗ brew update 실패");
+        return;
+    }
+    if !run("brew", &["upgrade", "wis-graph/tap/desklog"]) {
+        eprintln!("✗ 업그레이드 실패 (이미 최신이면 그냥 넘어가도 된다)");
+    }
+    if was_running {
+        run("brew", &["services", "restart", "desklog"]);
+    } else {
+        println!("수집기가 서비스로 돌고 있지 않았다. 띄우려면: brew services start desklog");
+    }
+    println!("\n이제 'desklog --version' 과 'desklog doctor' 로 확인한다.");
+}
+
 /// 잘 돌고 있는지, 무엇을 못 읽고 있는지. 문제가 조용히 지나가지 않게 한다.
 fn doctor(db: &Connection) {
     let now = unix_now();
@@ -1259,7 +1312,7 @@ mod tests {
 
     #[test]
     fn help_lists_every_command() {
-        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor", "focus", "note"] {
+        for cmd in ["watch", "now", "live", "log", "top", "label", "export", "doctor", "focus", "note", "update"] {
             assert!(HELP.contains(cmd), "도움말에 {cmd} 가 빠졌다");
         }
         assert!(HELP.contains("--help") && HELP.contains("--version"));

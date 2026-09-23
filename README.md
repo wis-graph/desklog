@@ -23,6 +23,16 @@ brew 는 미리 빌드해 **Developer ID 로 서명·공증한 universal 바이�
 `brew services`가 launchd에 등록하므로 재부팅해도 알아서 다시 뜬다.
 죽으면 다시 띄운다(`keep_alive`).
 
+올릴 때는 한 명령으로 끝난다:
+
+```
+desklog update
+```
+
+`brew update` → `brew upgrade` → (돌고 있었으면) `brew services restart` 를 순서대로 한다.
+판을 올리고 재시작을 빼먹으면 옛 바이너리가 계속 돌기 때문에 한 명령으로 묶었다.
+**스스로 판을 확인하러 나가지는 않는다** — 부를 때만 brew 를 시킨다.
+
 ```
 brew services list | grep desklog     상태 확인
 brew services stop desklog            중지
@@ -51,6 +61,7 @@ desklog top [일수] [앱]    앱별 시간·시간대·창 제목 요약 (기�
 desklog focus [일수]       한 앱 능동 사용 구간 — 오래 머물며 입력한 시간
 desklog note [앱] [설명]   앱 사용 패턴을 적거나 본다
 desklog doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지
+desklog update             최신판으로 올리고 수집기를 다시 띄운다
 desklog label yes|no       라벨 기록
 desklog export             학습용 CSV
 
