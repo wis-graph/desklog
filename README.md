@@ -76,7 +76,7 @@ desklog <읽기명령> --json   top·focus·note·log 을 JSON 으로 (기계·A
 로봇·AI 가 가장 자주 부르는 명령이다. watch 가 마지막으로 쓴 구간을 JSON 한 줄로 낸다.
 
 ```json
-{"t":1790176088,"age_s":1,"app":"카카오톡","title":"김보라","idle_s":11.6,"hour":0,
+{"t":1790176088,"age_s":1,"app":"Slack","title":"#general","idle_s":11.6,"hour":10,
  "session_s":661,"app_s":120,"span_s":45,"span_active_s":40,"locked":false}
 ```
 
@@ -102,16 +102,16 @@ nohup desklog watch > /tmp/desklog.log 2>&1 &
 
 ```
 구간                      길이       입력  앱                창 제목
-17:36:50~17:59:58   23분13초    0분00초  Ghostty          430course-material
-18:00:03~18:59:56   59분58초    0분00초  Ghostty          430course-material
-20:00:04~20:23:52   23분53초   13분10초  Ghostty          430course-material
+09:12:05~09:40:10   28분10초   24분35초  Code             main.rs — myproject
+09:40:15~09:52:30   12분20초    1분10초  Google Chrome    YouTube
+09:52:35~10:00:00    7분30초    6분55초  Slack            #general
 ```
 
 `길이`(화면 앞에 있던 시간)와 `입력`(실제로 입력이 있던 시간)이 나뉘어 있다.
 둘의 차이가 "보고만 있던 시간"이다.
 
 ```
-desklog top 7 카카오톡      그 앱만 좁혀서 본다
+desklog top 7 Slack         그 앱만 좁혀서 본다
 ```
 
 ## 몰입 — `focus`
@@ -124,15 +124,16 @@ desklog top 7 카카오톡      그 앱만 좁혀서 본다
 최근 7일 · 몰입 기준: 한 앱에 15분 이상, 그중 입력 50% 이상, 60초 이하 딴짓은 무시
 
 날짜     구간            길이    입력  앱         제목
-09-05  20:23~20:43   19분37초   99%  카카오톡    김보라
-09-05  21:29~22:21   52분31초   98%  카카오톡    -
-09-05  23:42~00:39   56분54초   97%  카카오톡    -
+03-02  09:12~10:47   95분12초   86%  Code       main.rs — myproject
+03-02  14:05~14:31   26분40초   71%  Code       README.md — myproject
+03-03  10:20~11:02   42분05초   64%  Slack      #design
 
 하루별 몰입
-  09-05    3시간27분  (구간 5개)
+  03-02    2시간01분  (구간 2개)
+  03-03      42분05초  (구간 1개)
 ```
 
-Chrome은 최전면 27시간, 입력 7분이다 — 창을 켜둔 채 자리를 비운 시간이라 `top`에서는 맨 아래로 가고
+Chrome이 최전면 5시간, 입력 7분이라면 — 창을 켜둔 채 자리를 비운 시간이라 `top`에서는 맨 아래로 가고
 `focus`에서는 아예 안 나온다.
 
 세 조건이다 — 한 앱에 오래(15분), 그동안 입력이 있었고(50%), 화면이 잠기지 않았다.
@@ -158,9 +159,9 @@ Chrome은 최전면 27시간, 입력 7분이다 — 창을 켜둔 채 자리를 
 
 ```
 앱별  (입력 있던 시간 / 최전면 시간)
-  Ghostty               14시간09분 /  74시간01분  ████████████████████████
-                         └ 터미널·에디터. 코딩/글쓰기 작업. 입력=능동 작업
-  Google Chrome           7분35초 /  27시간04분  █
+  Code                  14시간09분 /  31시간02분  ████████████████████████
+                         └ 에디터. 코딩 작업. 입력=능동 작업
+  Google Chrome           7분35초 /   5시간04분  █
                          └ 리서치 반, 유튜브 반. 입력 적으면 대개 영상 시청
 ```
 
@@ -191,12 +192,14 @@ desklog log 40 --json     원시 구간 배열
 ```json
 {
   "days": 7, "basis": "input_s",
-  "totals": { "input_s": 66234, "frontmost_s": 605343, "locked_s": 0 },
+  "totals": { "input_s": 51395, "frontmost_s": 130344, "locked_s": 0 },
   "apps": [
-    { "app": "캘린더", "input_s": 126760, "frontmost_s": 605343,
-      "note": "AI 자동화가 처리. 입력=합성 이벤트지 사람 아님. 집중 계산에서 제외" }
+    { "app": "Code", "input_s": 50940, "frontmost_s": 111720,
+      "note": "에디터. 코딩 작업. 입력=능동 작업" },
+    { "app": "Google Chrome", "input_s": 455, "frontmost_s": 18240,
+      "note": "리서치 반, 유튜브 반. 입력 적으면 대개 영상 시청" }
   ],
-  "hours": [ { "hour": 0, "input_s": 12830 }, ... ]
+  "hours": [ { "hour": 9, "input_s": 8830 }, ... ]
 }
 ```
 
@@ -266,8 +269,8 @@ brew services start desklog
 일부만 지우려면 sqlite 로 지운다:
 
 ```
-sqlite3 ~/.desklog.db "DELETE FROM spans WHERE app='카카오톡'"          # 한 앱
-sqlite3 ~/.desklog.db "UPDATE spans SET title=NULL WHERE app='카카오톡'" # 제목만
+sqlite3 ~/.desklog.db "DELETE FROM spans WHERE app='Slack'"          # 한 앱
+sqlite3 ~/.desklog.db "UPDATE spans SET title=NULL WHERE app='Slack'" # 제목만
 ```
 
 ## OS별로 갈리는 곳
