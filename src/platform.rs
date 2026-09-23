@@ -3,6 +3,7 @@
 /// 활성 창의 (앱 이름, 창 제목). 제목은 못 읽을 수 있다.
 /// macOS는 다른 앱의 창 제목에 화면 기록 권한이 필요해서, 미승인이면 None이 온다.
 pub fn active_window() -> Option<(String, Option<String>)> {
+    refresh_frontmost();
     let (app, title) = match active_win_pos_rs::get_active_window() {
         Ok(w) => (w.app_name.trim().to_string(), non_empty(w.title)),
         // 최전면 앱에 열거 가능한 창이 없으면 통째로 실패한다. 카카오톡 대화창에서 실제로 그렇다.
@@ -24,6 +25,25 @@ fn non_empty(s: String) -> Option<String> {
         Some(s)
     }
 }
+
+/// NSWorkspace 의 최전면 앱 값은 run loop 가 알림을 받아야 갱신된다.
+/// watch 처럼 run loop 를 돌리지 않는 상주 프로세스에서는 시작할 때 본 앱에 멈춘다.
+/// 읽기 직전에 run loop 를 한 번 돌려 쌓인 알림을 처리한다(기다리지 않는다).
+#[cfg(target_os = "macos")]
+fn refresh_frontmost() {
+    use std::ffi::c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source: u8) -> i32;
+    }
+    unsafe {
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refresh_frontmost() {}
 
 /// 창이 아니라 앱을 묻는다. 창 조회가 실패해도 이쪽은 답한다.
 #[cfg(target_os = "macos")]
