@@ -28,7 +28,7 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
   label yes|no       직전 개입이 먹혔는지 기록한다 (학습 라벨)
   export             학습용 CSV를 표준출력으로
   doctor             잘 돌고 있는지, 무엇을 못 읽고 있는지 진단한다
-  focus [일수]       몰입 구간 — 한 앱에 오래, 입력을 하면서 머문 시간 (기본 7일)
+  focus [일수]       한 앱 능동 사용 구간 — 오래 머물며 입력한 시간 (기본 7일)
 
 옵션:
   -h, --help         이 도움말
@@ -46,6 +46,13 @@ desklog — 사용자가 무엇을 하고 있는지 기록하는 수집기
 
 저장 위치:
   ~/.desklog.db (sqlite). 5초에 한 줄, 하루 1MB 미만.
+
+'집중'에 대하여:
+  desklog 는 어떤 앱을·얼마나·얼마나 입력하며·언제 썼는지만 정확히 잰다.
+  그게 '집중'이었는지는 재지 않는다 — 읽기·영상처럼 입력 없는 몰입은 못 잡고,
+  한 창 안의 딴짓은 능동 사용으로 잘못 잡는다.
+  집중 여부는 '어떤 앱이 집중 작업인가'를 사용자가 정하는 해석의 문제다.
+  focus 는 그 판단의 재료(한 앱 능동 사용 구간)를 줄 뿐, 판단하지 않는다.
 ";
 
 fn main() {
@@ -736,13 +743,14 @@ fn focus(db: &Connection, days: i64) {
 
     let blocks: Vec<Block> = build_blocks(&rows).into_iter().filter(is_focus).collect();
     println!(
-        "\n최근 {days}일 · 몰입 기준: 한 앱에 {}분 이상, 그중 입력 {}% 이상, {}초 이하 딴짓은 무시\n",
+        "\n최근 {days}일 · 한 앱에 {}분 이상, 그중 입력 {}% 이상, {}초 이하 딴짓은 무시\n\
+         (능동 사용 구간이다. 어떤 앱이 '집중'인지는 보는 사람이 정한다 — desklog --help)\n",
         FOCUS_MIN_S / 60,
         FOCUS_MIN_ACTIVE_PCT,
         FOCUS_GAP_TOLERANCE_S
     );
     if blocks.is_empty() {
-        println!("몰입 구간 없음.\n");
+        println!("능동 사용 구간 없음.\n");
         return;
     }
 
